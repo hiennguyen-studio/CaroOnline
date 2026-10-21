@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("CaroOnline.Winforms")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+82938f66bb45d222f6f0884ca7f86b8d1101c8e3")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+20f9aac30558ec15c03d3ba2556994975693e23e")]
 [assembly: System.Reflection.AssemblyProductAttribute("CaroOnline.Winforms")]
 [assembly: System.Reflection.AssemblyTitleAttribute("CaroOnline.Winforms")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
