@@ -1,0 +1,36 @@
+{
+  "Version": 1,
+  "WorkspaceRootPath": "D:\\CaroOnline\\012012301303-NET_262701303_10-UDM_16\\Code\\CarOnline.WinForms\\",
+  "Documents": [
+    {
+      "AbsoluteMoniker": "D:0:0:{54D6ED4A-BD0D-41D7-BFE8-83434E0EB47F}|CarOnline.WinForms\\CarOnline.WinForms.csproj|d:\\caroonline\\012012301303-net_262701303_10-udm_16\\code\\caronline.winforms\\caronline.winforms\\form1.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}|Form",
+      "RelativeMoniker": "D:0:0:{54D6ED4A-BD0D-41D7-BFE8-83434E0EB47F}|CarOnline.WinForms\\CarOnline.WinForms.csproj|solutionrelative:caronline.winforms\\form1.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}|Form"
+    }
+  ],
+  "DocumentGroupContainers": [
+    {
+      "Orientation": 0,
+      "VerticalTabListWidth": 256,
+      "DocumentGroups": [
+        {
+          "DockedWidth": 200,
+          "SelectedChildIndex": 0,
+          "Children": [
+            {
+              "$type": "Document",
+              "DocumentIndex": 0,
+              "Title": "Form1.cs [Design]",
+              "DocumentMoniker": "D:\\CaroOnline\\012012301303-NET_262701303_10-UDM_16\\Code\\CarOnline.WinForms\\CarOnline.WinForms\\Form1.cs",
+              "RelativeDocumentMoniker": "CarOnline.WinForms\\Form1.cs",
+              "ToolTip": "D:\\CaroOnline\\012012301303-NET_262701303_10-UDM_16\\Code\\CarOnline.WinForms\\CarOnline.WinForms\\Form1.cs [Design]",
+              "RelativeToolTip": "CarOnline.WinForms\\Form1.cs [Design]",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-10-21T12:49:19.674Z",
+              "EditorCaption": " [Design]"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
