@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("CaroOnline.Winforms")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+bd8e651857e5461b0440d5bb1417a37050cd9491")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+da5a8b15752bdf99c64d803e7e8f87f76630c3a6")]
 [assembly: System.Reflection.AssemblyProductAttribute("CaroOnline.Winforms")]
 [assembly: System.Reflection.AssemblyTitleAttribute("CaroOnline.Winforms")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
