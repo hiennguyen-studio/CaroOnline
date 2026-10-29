@@ -61,8 +61,8 @@ namespace GameCaro
             this.MarkPlayer = markPlayer;
             this.Player = new List<Player>()
             {
-                new Player("Player 1", Image.FromFile("C:\\Users\\Hieu\\Downloads\\CaroOnline-main\\CaroOnline-main\\012012301303-NET_262701303_10-UDM_16\\Code\\CaroOnline.Winforms\\CaroOnline.Winforms\\Resources\\iconX.png")),
-                new Player("Player 2", Image.FromFile("C:\\Users\\Hieu\\Downloads\\CaroOnline-main\\CaroOnline-main\\012012301303-NET_262701303_10-UDM_16\\Code\\CaroOnline.Winforms\\CaroOnline.Winforms\\Resources\\iconO.png"))
+                new Player("Player 1", Image.FromFile("012012301303-NET_262701303_10-UDM_16\\Code\\CaroOnline.Winforms\\CaroOnline.Winforms\\Resources\\iconX.png")),
+                new Player("Player 2", Image.FromFile("012012301303-NET_262701303_10-UDM_16\\Code\\CaroOnline.Winforms\\CaroOnline.Winforms\\Resources\\iconO.png"))
             };
             currentPlayer=0;
 
