@@ -1,9 +1,10 @@
+﻿using CaroOnline.Winforms;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
-using Player = CaroOnline.Winforms.Player;
+//using Player = CaroOnline.Winforms.Player;
 
 namespace GameCaro
 {
@@ -19,54 +20,54 @@ namespace GameCaro
             set { chessBoard = value; }
         }
 
-        private List<Player> player;
+        //private List<Player> player;
 
-        public List<Player> Player
-        {
-            get { return player; }
-            set { player = value; }
-        }
+        //public List<Player> Player
+        //{
+        //    get { return player; }
+        //    set { player = value; }
+        //}
 
-        private int currentPlayer;
+        //private int currentPlayer;
 
-        public int CurrentPlayer
-        {
-            get { return currentPlayer; }
-            set { currentPlayer = value; }
-        }
+        //public int CurrentPlayer
+        //{
+        //    get { return currentPlayer; }
+        //    set { currentPlayer = value; }
+        //}
 
-        private TextBox playerName;
+        //private TextBox playerName;
 
-        public TextBox PlayerName
-        {
-            get { return playerName; }
-            set { playerName = value; }
-        }
+        //public TextBox PlayerName
+        //{
+        //    get { return playerName; }
+        //    set { playerName = value; }
+        //}
 
-        private PictureBox markPlayer;
+        //private PictureBox markPlayer;
 
-        public PictureBox MarkPlayer
-        {
-            get { return markPlayer; }
-            set { markPlayer = value; }
-        }
+        //public PictureBox MarkPlayer
+        //{
+        //    get { return markPlayer; }
+        //    set { markPlayer = value; }
+        //}
 
         #endregion
 
         #region Initialize
-        public ChessBoardManager(Panel chessBoard, TextBox playerName, PictureBox markPlayer)
+        public ChessBoardManager(Panel chessBoard)// TextBox playerName, PictureBox markPlayer
         {
-            this.ChessBoard = chessBoard;
-            this.PlayerName = playerName;
-            this.MarkPlayer = markPlayer;
-            this.Player = new List<Player>()
-            {
-                new Player("Player 1", Image.FromFile("012012301303-NET_262701303_10-UDM_16\\Code\\CaroOnline.Winforms\\CaroOnline.Winforms\\Resources\\iconX.png")),
-                new Player("Player 2", Image.FromFile("012012301303-NET_262701303_10-UDM_16\\Code\\CaroOnline.Winforms\\CaroOnline.Winforms\\Resources\\iconO.png"))
-            };
-            currentPlayer=0;
+            this.chessBoard = chessBoard;
+            //this.PlayerName = playerName;
+            //this.MarkPlayer = markPlayer;
+            //this.Player = new List<Player>()
+            //{
+            //    new Player("Player 1", Image.FromFile("012012301303-NET_262701303_10-UDM_16\\Code\\CaroOnline.Winforms\\CaroOnline.Winforms\\Resources\\iconX.jpg")),
+            //    new Player("Player 2", Image.FromFile("012012301303-NET_262701303_10-UDM_16\\Code\\CaroOnline.Winforms\\CaroOnline.Winforms\\Resources\\iconO.jpg"))
+            //};
+            //currentPlayer = 0;
 
-            ChangePlayer();
+            //ChangePlayer();
         }
         #endregion
 
@@ -86,7 +87,7 @@ namespace GameCaro
                         BackgroundImageLayout = ImageLayout.Stretch
                     };
 
-                    btn.Click += btn_Click;
+                    //btn.Click += btn_Click;
 
                     chessBoard.Controls.Add(btn);
 
@@ -97,32 +98,30 @@ namespace GameCaro
                 oldButton.Height = 0;
             }
         }
+        //private void btn_Click(object? sender, EventArgs e)
+        //{
+        //    Button btn = sender as Button;
 
-        private void btn_Click(object? sender, EventArgs e)
-        {
-            Button btn = sender as Button;
+        //    if (btn.BackgroundImage != null)
+        //        return;
 
-            if(btn.BackgroundImage != null)
-                return;
-            
-            Mark(btn);
-            ChangePlayer();
+        //    Mark(btn);
+        //    ChangePlayer();
 
-        }
+        //}
 
-        private void Mark(Button btn)
-        {
-            btn.BackgroundImage = Player[currentPlayer].Mark;
+        //private void Mark(Button btn)
+        //{
+        //    btn.BackgroundImage = Player[currentPlayer].Mark;
 
-            currentPlayer = (currentPlayer == 0) ? 1 : 0;
-        }
+        //    currentPlayer = (currentPlayer == 0) ? 1 : 0;
+        //}
 
-        private void ChangePlayer()
-        {
-            PlayerName.Text = Player[currentPlayer].Name;
-            MarkPlayer.Image = Player[currentPlayer].Mark;
-        }
-
+        //private void ChangePlayer()
+        //{
+        //    PlayerName.Text = Player[currentPlayer].Name;
+        //    MarkPlayer.Image = Player[currentPlayer].Mark;
+        //}
         #endregion
     }
 }
