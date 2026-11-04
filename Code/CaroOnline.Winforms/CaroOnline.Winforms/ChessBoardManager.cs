@@ -12,10 +12,8 @@ namespace GameCaro
 {
     public class ChessBoardManager
     {
-
         #region Properties
         private Panel chessBoard;
-
         public Panel ChessBoard
         {
             get { return chessBoard; }
@@ -23,7 +21,6 @@ namespace GameCaro
         }
 
         private List<Player> player;
-
         public List<Player> Player
         {
             get { return player; }
@@ -31,7 +28,6 @@ namespace GameCaro
         }
 
         private int currentPlayer;
-
         public int CurrentPlayer
         {
             get { return currentPlayer; }
@@ -39,7 +35,6 @@ namespace GameCaro
         }
 
         private TextBox playerName;
-
         public TextBox PlayerName
         {
             get { return playerName; }
@@ -47,14 +42,13 @@ namespace GameCaro
         }
 
         private PictureBox markPlayer;
-
         public PictureBox MarkPlayer
         {
             get { return markPlayer; }
             set { markPlayer = value; }
         }
-        private List<List<Button>> matrix;
 
+        private List<List<Button>> matrix;
         public List<List<Button>> Matrix
         {
             get { return matrix; }
@@ -62,7 +56,6 @@ namespace GameCaro
         }
 
         private event EventHandler playerMarked;
-
         public event EventHandler PlayerMarked
         {
             add { playerMarked += value; }
@@ -70,7 +63,6 @@ namespace GameCaro
         }
 
         private event EventHandler endeGame;
-
         public event EventHandler EndeGame
         {
             add { endeGame += value; }
@@ -84,7 +76,6 @@ namespace GameCaro
             this.ChessBoard = chessBoard;
             this.PlayerName = playerName;
             this.MarkPlayer = markPlayer;
-
             this.MarkPlayer.SizeMode = PictureBoxSizeMode.StretchImage;
 
             string resourcePath = Path.Combine(Application.StartupPath, "Resources");
@@ -94,24 +85,23 @@ namespace GameCaro
                 new Player("Player 1", Image.FromFile(Path.Combine(resourcePath, "iconX.jpg"))),
                 new Player("Player 2", Image.FromFile(Path.Combine(resourcePath, "iconO.jpg")))
             };
-            currentPlayer=0;
+            currentPlayer = 0;
 
             ChangePlayer();
         }
-
-        
         #endregion
 
         #region Methods
         public void DrawChessBoard()
         {
             ChessBoard.Enabled = true;
+            ChessBoard.Controls.Clear(); 
             Matrix = new List<List<Button>>();
             Button oldButton = new Button() { Width = 0, Location = new Point(0, 0) };
+
             for (int i = 0; i < Cons.CHESS_BOARD_HEIGHT; i++)
             {
                 Matrix.Add(new List<Button>());
-
                 for (int j = 0; j < Cons.CHESS_BOARD_WIDTH; j++)
                 {
                     Button btn = new Button()
@@ -124,14 +114,12 @@ namespace GameCaro
                     };
 
                     btn.Click += btn_Click;
-
                     chessBoard.Controls.Add(btn);
-
                     Matrix[i].Add(btn);
 
                     oldButton = btn;
                 }
-                oldButton.Location = new Point(0, oldButton.Location.Y + Cons.CHESS_HEIGHT);    
+                oldButton.Location = new Point(0, oldButton.Location.Y + Cons.CHESS_HEIGHT);
                 oldButton.Width = 0;
                 oldButton.Height = 0;
             }
@@ -140,12 +128,10 @@ namespace GameCaro
         private void btn_Click(object? sender, EventArgs e)
         {
             Button btn = sender as Button;
-
-            if(btn.BackgroundImage != null)
+            if (btn.BackgroundImage != null)
                 return;
-            
-            Mark(btn);
 
+            Mark(btn);
             ChangePlayer();
 
             if (playerMarked != null)
@@ -155,7 +141,6 @@ namespace GameCaro
             {
                 EndGame();
             }
-
         }
 
         public void EndGame()
@@ -166,6 +151,10 @@ namespace GameCaro
 
         private bool isEndGame(Button btn)
         {
+            Point point = GetChessPoint(btn);
+            if (point.X < 0 || point.Y < 0)
+                return false;
+
             return isEndHorizontal(btn) || isEndVertical(btn) || isEndPrimary(btn) || isEndSub(btn);
         }
 
@@ -174,21 +163,29 @@ namespace GameCaro
             int vertical = Convert.ToInt32(btn.Tag);
             int horizontal = Matrix[vertical].IndexOf(btn);
 
-            Point point = new Point(horizontal, vertical);
+            if (horizontal == -1)
+            {
+                for (int i = 0; i < Cons.CHESS_BOARD_HEIGHT; i++)
+                {
+                    for (int j = 0; j < Cons.CHESS_BOARD_WIDTH; j++)
+                    {
+                        if (Matrix[i][j] == btn)
+                            return new Point(j, i);
+                    }
+                }
+            }
 
-            return point;
+            return new Point(horizontal, vertical);
         }
+
         private bool isEndHorizontal(Button btn)
         {
             Point point = GetChessPoint(btn);
-
             int countLeft = 0;
             for (int i = point.X; i >= 0; i--)
             {
                 if (Matrix[point.Y][i].BackgroundImage == btn.BackgroundImage)
-                {
                     countLeft++;
-                }
                 else
                     break;
             }
@@ -197,27 +194,22 @@ namespace GameCaro
             for (int i = point.X + 1; i < Cons.CHESS_BOARD_WIDTH; i++)
             {
                 if (Matrix[point.Y][i].BackgroundImage == btn.BackgroundImage)
-                {
                     contRight++;
-                }
                 else
                     break;
             }
 
-            return (countLeft + contRight) == 5;
+            return (countLeft + contRight) >= 5;
         }
 
         private bool isEndVertical(Button btn)
         {
             Point point = GetChessPoint(btn);
-
             int countTop = 0;
             for (int i = point.Y; i >= 0; i--)
             {
                 if (Matrix[i][point.X].BackgroundImage == btn.BackgroundImage)
-                {
                     countTop++;
-                }
                 else
                     break;
             }
@@ -226,86 +218,74 @@ namespace GameCaro
             for (int i = point.Y + 1; i < Cons.CHESS_BOARD_HEIGHT; i++)
             {
                 if (Matrix[i][point.X].BackgroundImage == btn.BackgroundImage)
-                {
                     countBottom++;
-                }
                 else
                     break;
             }
 
-            return (countTop + countBottom) == 5;
+            return (countTop + countBottom) >= 5;
         }
 
+        // SỬA LỖI 2: Xóa điều kiện (i <= point.X) làm giới hạn sai chéo chính
         private bool isEndPrimary(Button btn)
         {
             Point point = GetChessPoint(btn);
-
             int countTop = 0;
-            for (int i = 0; i <= point.X; i++)
+            for (int i = 0; i < Cons.CHESS_BOARD_WIDTH; i++)
             {
                 if (point.Y - i < 0 || point.X - i < 0)
                     break;
-                if (Matrix[point.Y-i][point.X-i].BackgroundImage == btn.BackgroundImage)
-                {
+                if (Matrix[point.Y - i][point.X - i].BackgroundImage == btn.BackgroundImage)
                     countTop++;
-                }
                 else
                     break;
             }
 
             int countBottom = 0;
-            for (int i = 1; i <= Cons.CHESS_BOARD_WIDTH - point.X; i++)
+            for (int i = 1; i < Cons.CHESS_BOARD_WIDTH; i++)
             {
                 if (point.Y + i >= Cons.CHESS_BOARD_HEIGHT || point.X + i >= Cons.CHESS_BOARD_WIDTH)
                     break;
-                if (Matrix[point.Y+i][point.X+i].BackgroundImage == btn.BackgroundImage)
-                {
+                if (Matrix[point.Y + i][point.X + i].BackgroundImage == btn.BackgroundImage)
                     countBottom++;
-                }
                 else
                     break;
             }
 
-            return (countTop + countBottom) == 5;
+            return (countTop + countBottom) >= 5;
         }
 
         private bool isEndSub(Button btn)
         {
             Point point = GetChessPoint(btn);
-
             int countTop = 0;
-            for (int i = 0; i <= point.X; i++)
+            for (int i = 0; i < Cons.CHESS_BOARD_WIDTH; i++)
             {
                 if (point.Y - i < 0 || point.X + i >= Cons.CHESS_BOARD_WIDTH)
                     break;
                 if (Matrix[point.Y - i][point.X + i].BackgroundImage == btn.BackgroundImage)
-                {
                     countTop++;
-                }
                 else
                     break;
             }
 
             int countBottom = 0;
-            for (int i = 1; i <= Cons.CHESS_BOARD_WIDTH - point.X; i++)
+            for (int i = 1; i < Cons.CHESS_BOARD_WIDTH; i++)
             {
                 if (point.Y + i >= Cons.CHESS_BOARD_HEIGHT || point.X - i < 0)
                     break;
                 if (Matrix[point.Y + i][point.X - i].BackgroundImage == btn.BackgroundImage)
-                {
                     countBottom++;
-                }
                 else
                     break;
             }
 
-            return (countTop + countBottom) == 5;
+            return (countTop + countBottom) >= 5;
         }
 
         private void Mark(Button btn)
         {
             btn.BackgroundImage = Player[currentPlayer].Mark;
-
             currentPlayer = (currentPlayer == 0) ? 1 : 0;
         }
 
@@ -314,7 +294,6 @@ namespace GameCaro
             PlayerName.Text = Player[currentPlayer].Name;
             MarkPlayer.Image = Player[currentPlayer].Mark;
         }
-
         #endregion
     }
 }
