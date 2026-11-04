@@ -10,9 +10,26 @@ namespace CaroOnline.Winforms
         {
             InitializeComponent();
             ChessBoard = new ChessBoardManager(pnlChessBoard, txbPlayerName, pctbMark);
-            ChessBoard.DrawChessBoard();
-        }
+            ChessBoard.EndeGame += ChessBoard_EndeGame;
+            ChessBoard.PlayerMarked += ChessBoard_PlayerMarked;
 
+            prcbCoolDown.Step = Cons.COOL_DOWN_STEP;
+            prcbCoolDown.Maximum = Cons.COOL_DOWN_TIME;
+            prcbCoolDown.Value = 0;
+
+            tmCoolDown.Interval = Cons.COOL_DOWN_INTERVAL;
+
+            ChessBoard.DrawChessBoard();
+
+        } 
+
+        void EndGame()
+        {
+            tmCoolDown.Stop();
+
+            pnlChessBoard.Enabled = false;
+            MessageBox.Show("kết thúc");
+        }
         private void progressBar1_Click(object sender, EventArgs e)
         {
 
@@ -20,7 +37,7 @@ namespace CaroOnline.Winforms
 
         private void button1_Click(object sender, EventArgs e)
         {
-
+            EndGame();
         }
 
         private void label1_Click(object sender, EventArgs e)
@@ -33,5 +50,26 @@ namespace CaroOnline.Winforms
 
         }
         #endregion
+
+        private void ChessBoard_EndeGame(object sender, EventArgs e)
+        {
+            EndGame();
+        }
+
+        private void ChessBoard_PlayerMarked (object sender, EventArgs e)
+        {
+            tmCoolDown.Start();
+            prcbCoolDown.Value = 0;
+        }
+        private void timer1_Tick(object sender, EventArgs e)
+        {
+
+            prcbCoolDown.PerformStep(); 
+            if(prcbCoolDown.Value>=prcbCoolDown.Maximum)
+            {
+                EndGame();
+                
+            }
+        }
     }
 }
