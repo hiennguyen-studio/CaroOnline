@@ -61,6 +61,21 @@ namespace GameCaro
             set { matrix = value; }
         }
 
+        private event EventHandler playerMarked;
+
+        public event EventHandler PlayerMarked
+        {
+            add { playerMarked += value; }
+            remove { playerMarked -= value; }
+        }
+
+        private event EventHandler endeGame;
+
+        public event EventHandler EndeGame
+        {
+            add { endeGame += value; }
+            remove { endeGame -= value; }
+        }
         #endregion
 
         #region Initialize
@@ -90,6 +105,7 @@ namespace GameCaro
         #region Methods
         public void DrawChessBoard()
         {
+            ChessBoard.Enabled = true;
             Matrix = new List<List<Button>>();
             Button oldButton = new Button() { Width = 0, Location = new Point(0, 0) };
             for (int i = 0; i < Cons.CHESS_BOARD_HEIGHT; i++)
@@ -132,6 +148,9 @@ namespace GameCaro
 
             ChangePlayer();
 
+            if (playerMarked != null)
+                playerMarked(this, new EventArgs());
+
             if (isEndGame(btn))
             {
                 EndGame();
@@ -139,9 +158,10 @@ namespace GameCaro
 
         }
 
-        private void EndGame()
+        public void EndGame()
         {
-            MessageBox.Show("Game Over");
+            if (endeGame != null)
+                endeGame(this, new EventArgs());
         }
 
         private bool isEndGame(Button btn)
@@ -258,7 +278,7 @@ namespace GameCaro
             {
                 if (point.Y - i < 0 || point.X + i >= Cons.CHESS_BOARD_WIDTH)
                     break;
-                if (Matrix[point.Y-i][point.X+i].BackgroundImage == btn.BackgroundImage)
+                if (Matrix[point.Y - i][point.X + i].BackgroundImage == btn.BackgroundImage)
                 {
                     countTop++;
                 }
@@ -271,7 +291,7 @@ namespace GameCaro
             {
                 if (point.Y + i >= Cons.CHESS_BOARD_HEIGHT || point.X - i < 0)
                     break;
-                if (Matrix[point.Y+i][point.X-i].BackgroundImage == btn.BackgroundImage)
+                if (Matrix[point.Y + i][point.X - i].BackgroundImage == btn.BackgroundImage)
                 {
                     countBottom++;
                 }

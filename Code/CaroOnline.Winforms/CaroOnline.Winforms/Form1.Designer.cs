@@ -28,6 +28,7 @@
         /// </summary>
         private void InitializeComponent()
         {
+            components = new System.ComponentModel.Container();
             pnlChessBoard = new Panel();
             pctbAvatar = new PictureBox();
             information = new Panel();
@@ -37,6 +38,7 @@
             txbIP = new TextBox();
             txbPlayerName = new TextBox();
             prcbCoolDown = new ProgressBar();
+            tmCoolDown = new System.Windows.Forms.Timer(components);
             ((System.ComponentModel.ISupportInitialize)pctbAvatar).BeginInit();
             information.SuspendLayout();
             ((System.ComponentModel.ISupportInitialize)pctbMark).BeginInit();
@@ -128,6 +130,10 @@
             prcbCoolDown.TabIndex = 0;
             prcbCoolDown.Click += progressBar1_Click;
             // 
+            // tmCoolDown
+            // 
+            tmCoolDown.Tick += timer1_Tick;
+            // 
             // Form1
             // 
             AutoScaleDimensions = new SizeF(8F, 20F);
@@ -156,5 +162,6 @@
         private PictureBox pctbMark;
         private Button Lan;
         private Label rule;
+        private System.Windows.Forms.Timer tmCoolDown;
     }
 }
