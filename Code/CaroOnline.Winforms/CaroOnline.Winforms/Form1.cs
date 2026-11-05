@@ -1,3 +1,6 @@
+
+using System;
+using System.Windows.Forms;
 using GameCaro;
 
 namespace CaroOnline.Winforms
@@ -5,11 +8,19 @@ namespace CaroOnline.Winforms
     public partial class Form1 : Form
     {
         #region Properties
+
         ChessBoardManager ChessBoard;
+
         public Form1()
         {
             InitializeComponent();
-            ChessBoard = new ChessBoardManager(pnlChessBoard, txbPlayerName, pctbMark);
+
+            ChessBoard = new ChessBoardManager(
+                pnlChessBoard,
+                txbPlayerName,
+                pctbMark
+            );
+
             ChessBoard.EndeGame += ChessBoard_EndeGame;
             ChessBoard.PlayerMarked += ChessBoard_PlayerMarked;
 
@@ -20,26 +31,43 @@ namespace CaroOnline.Winforms
             tmCoolDown.Interval = Cons.COOL_DOWN_INTERVAL;
 
             NewGame();
-            ChessBoard.DrawChessBoard();
-
         }
+
+        #endregion
+
+        #region Methods
 
         void EndGame()
         {
             tmCoolDown.Stop();
 
             pnlChessBoard.Enabled = false;
-            MessageBox.Show("kết thúc");
+            undoToolStripMenuItem.Enabled = false;
+
+            MessageBox.Show("Kết thúc");
         }
+
         void NewGame()
         {
-            ChessBoard.DrawChessBoard();
+            ChessBoard.NewGame();
+            undoToolStripMenuItem.Enabled = true;
+            prcbCoolDown.Value = 0;
+            tmCoolDown.Stop();
         }
-        void Undo() { }
+
+        void UndoMove()
+        {
+            ChessBoard.Undo();
+        }
+
         void Quit()
-        { 
-                Application.Exit();
+        {
+            Application.Exit();
         }
+
+        #endregion
+
+        #region Events
 
         private void progressBar1_Click(object sender, EventArgs e)
         {
@@ -60,7 +88,6 @@ namespace CaroOnline.Winforms
         {
 
         }
-        #endregion
 
         private void ChessBoard_EndeGame(object sender, EventArgs e)
         {
@@ -72,28 +99,25 @@ namespace CaroOnline.Winforms
             tmCoolDown.Start();
             prcbCoolDown.Value = 0;
         }
+
         private void timer1_Tick(object sender, EventArgs e)
         {
-
             prcbCoolDown.PerformStep();
+
             if (prcbCoolDown.Value >= prcbCoolDown.Maximum)
             {
                 EndGame();
-
             }
         }
 
         private void newGameToolStripMenuItem_Click(object sender, EventArgs e)
         {
-            prcbCoolDown.Value = 0;
-            tmCoolDown.Stop();
-
             NewGame();
-
         }
+
         private void undoToolStripMenuItem_Click(object sender, EventArgs e)
         {
-            Undo();
+            UndoMove();
         }
 
         private void quitToolStripMenuItem_Click(object sender, EventArgs e)
@@ -103,8 +127,17 @@ namespace CaroOnline.Winforms
 
         private void Form1_FormClosing(object sender, FormClosingEventArgs e)
         {
-            if (MessageBox.Show("Nhấn OK để thoát", "Thông báo", MessageBoxButtons.OKCancel) != DialogResult.OK)
+            if (MessageBox.Show(
+                "Nhấn OK để thoát",
+                "Thông báo",
+                MessageBoxButtons.OKCancel
+                ) != DialogResult.OK)
+            {
                 e.Cancel = true;
+            }
         }
+
+        #endregion
     }
 }
+
