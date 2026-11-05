@@ -55,14 +55,14 @@
             pnlChessBoard.BackColor = SystemColors.Control;
             pnlChessBoard.Location = new Point(9, 27);
             pnlChessBoard.Name = "pnlChessBoard";
-            pnlChessBoard.Size = new Size(870, 686);
+            pnlChessBoard.Size = new Size(870, 700);
             pnlChessBoard.TabIndex = 0;
             pnlChessBoard.Paint += chessboard_Paint;
             // 
             // pctbAvatar
             // 
             pctbAvatar.Image = Properties.Resources.logo;
-            pctbAvatar.Location = new Point(888, 26);
+            pctbAvatar.Location = new Point(885, 26);
             pctbAvatar.Name = "pctbAvatar";
             pctbAvatar.Size = new Size(223, 223);
             pctbAvatar.SizeMode = PictureBoxSizeMode.StretchImage;
@@ -146,7 +146,7 @@
             menuStrip1.Items.AddRange(new ToolStripItem[] { menuToolStripMenuItem });
             menuStrip1.Location = new Point(0, 0);
             menuStrip1.Name = "menuStrip1";
-            menuStrip1.Size = new Size(1115, 28);
+            menuStrip1.Size = new Size(1122, 28);
             menuStrip1.TabIndex = 3;
             menuStrip1.Text = "menuStrip1";
             // 
@@ -161,7 +161,7 @@
             // 
             newGameToolStripMenuItem.Name = "newGameToolStripMenuItem";
             newGameToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.N;
-            newGameToolStripMenuItem.Size = new Size(224, 26);
+            newGameToolStripMenuItem.Size = new Size(217, 26);
             newGameToolStripMenuItem.Text = "New game";
             newGameToolStripMenuItem.Click += newGameToolStripMenuItem_Click;
             // 
@@ -169,7 +169,7 @@
             // 
             undoToolStripMenuItem.Name = "undoToolStripMenuItem";
             undoToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.Z;
-            undoToolStripMenuItem.Size = new Size(224, 26);
+            undoToolStripMenuItem.Size = new Size(217, 26);
             undoToolStripMenuItem.Text = "Undo";
             undoToolStripMenuItem.Click += undoToolStripMenuItem_Click;
             // 
@@ -177,7 +177,7 @@
             // 
             quitToolStripMenuItem.Name = "quitToolStripMenuItem";
             quitToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.Q;
-            quitToolStripMenuItem.Size = new Size(224, 26);
+            quitToolStripMenuItem.Size = new Size(217, 26);
             quitToolStripMenuItem.Text = "Quit";
             quitToolStripMenuItem.Click += quitToolStripMenuItem_Click;
             // 
@@ -185,7 +185,7 @@
             // 
             AutoScaleDimensions = new SizeF(8F, 20F);
             AutoScaleMode = AutoScaleMode.Font;
-            ClientSize = new Size(1115, 725);
+            ClientSize = new Size(1122, 737);
             Controls.Add(information);
             Controls.Add(pctbAvatar);
             Controls.Add(pnlChessBoard);
@@ -194,6 +194,7 @@
             Name = "Form1";
             Text = "CaroOnline";
             FormClosing += Form1_FormClosing;
+            Load += Form1_Load;
             ((System.ComponentModel.ISupportInitialize)pctbAvatar).EndInit();
             information.ResumeLayout(false);
             information.PerformLayout();

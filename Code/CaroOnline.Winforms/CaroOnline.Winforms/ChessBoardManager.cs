@@ -106,7 +106,7 @@ namespace GameCaro
             for (int i = 0; i < Cons.CHESS_BOARD_HEIGHT; i++)
             {
                 Matrix.Add(new List<Button>());
-                for (int j = 0; j < Cons.CHESS_BOARD_WIDTH; j++)
+                for (int j = 0; j <= Cons.CHESS_BOARD_WIDTH; j++)
                 {
                     Button btn = new Button()
                     {
