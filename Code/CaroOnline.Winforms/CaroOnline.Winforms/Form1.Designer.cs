@@ -39,24 +39,30 @@
             txbPlayerName = new TextBox();
             prcbCoolDown = new ProgressBar();
             tmCoolDown = new System.Windows.Forms.Timer(components);
+            menuStrip1 = new MenuStrip();
+            menuToolStripMenuItem = new ToolStripMenuItem();
+            newGameToolStripMenuItem = new ToolStripMenuItem();
+            undoToolStripMenuItem = new ToolStripMenuItem();
+            quitToolStripMenuItem = new ToolStripMenuItem();
             ((System.ComponentModel.ISupportInitialize)pctbAvatar).BeginInit();
             information.SuspendLayout();
             ((System.ComponentModel.ISupportInitialize)pctbMark).BeginInit();
+            menuStrip1.SuspendLayout();
             SuspendLayout();
             // 
             // pnlChessBoard
             // 
             pnlChessBoard.BackColor = SystemColors.Control;
-            pnlChessBoard.Location = new Point(10, 12);
+            pnlChessBoard.Location = new Point(9, 27);
             pnlChessBoard.Name = "pnlChessBoard";
-            pnlChessBoard.Size = new Size(870, 700);
+            pnlChessBoard.Size = new Size(870, 686);
             pnlChessBoard.TabIndex = 0;
             pnlChessBoard.Paint += chessboard_Paint;
             // 
             // pctbAvatar
             // 
             pctbAvatar.Image = Properties.Resources.logo;
-            pctbAvatar.Location = new Point(888, 12);
+            pctbAvatar.Location = new Point(888, 26);
             pctbAvatar.Name = "pctbAvatar";
             pctbAvatar.Size = new Size(223, 223);
             pctbAvatar.SizeMode = PictureBoxSizeMode.StretchImage;
@@ -72,7 +78,7 @@
             information.Controls.Add(txbIP);
             information.Controls.Add(txbPlayerName);
             information.Controls.Add(prcbCoolDown);
-            information.Location = new Point(885, 241);
+            information.Location = new Point(885, 255);
             information.Name = "information";
             information.Size = new Size(223, 471);
             information.TabIndex = 2;
@@ -134,6 +140,47 @@
             // 
             tmCoolDown.Tick += timer1_Tick;
             // 
+            // menuStrip1
+            // 
+            menuStrip1.ImageScalingSize = new Size(20, 20);
+            menuStrip1.Items.AddRange(new ToolStripItem[] { menuToolStripMenuItem });
+            menuStrip1.Location = new Point(0, 0);
+            menuStrip1.Name = "menuStrip1";
+            menuStrip1.Size = new Size(1115, 28);
+            menuStrip1.TabIndex = 3;
+            menuStrip1.Text = "menuStrip1";
+            // 
+            // menuToolStripMenuItem
+            // 
+            menuToolStripMenuItem.DropDownItems.AddRange(new ToolStripItem[] { newGameToolStripMenuItem, undoToolStripMenuItem, quitToolStripMenuItem });
+            menuToolStripMenuItem.Name = "menuToolStripMenuItem";
+            menuToolStripMenuItem.Size = new Size(60, 24);
+            menuToolStripMenuItem.Text = "Menu";
+            // 
+            // newGameToolStripMenuItem
+            // 
+            newGameToolStripMenuItem.Name = "newGameToolStripMenuItem";
+            newGameToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.N;
+            newGameToolStripMenuItem.Size = new Size(224, 26);
+            newGameToolStripMenuItem.Text = "New game";
+            newGameToolStripMenuItem.Click += newGameToolStripMenuItem_Click;
+            // 
+            // undoToolStripMenuItem
+            // 
+            undoToolStripMenuItem.Name = "undoToolStripMenuItem";
+            undoToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.Z;
+            undoToolStripMenuItem.Size = new Size(224, 26);
+            undoToolStripMenuItem.Text = "Undo";
+            undoToolStripMenuItem.Click += undoToolStripMenuItem_Click;
+            // 
+            // quitToolStripMenuItem
+            // 
+            quitToolStripMenuItem.Name = "quitToolStripMenuItem";
+            quitToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.Q;
+            quitToolStripMenuItem.Size = new Size(224, 26);
+            quitToolStripMenuItem.Text = "Quit";
+            quitToolStripMenuItem.Click += quitToolStripMenuItem_Click;
+            // 
             // Form1
             // 
             AutoScaleDimensions = new SizeF(8F, 20F);
@@ -142,13 +189,19 @@
             Controls.Add(information);
             Controls.Add(pctbAvatar);
             Controls.Add(pnlChessBoard);
+            Controls.Add(menuStrip1);
+            MainMenuStrip = menuStrip1;
             Name = "Form1";
             Text = "CaroOnline";
+            FormClosing += Form1_FormClosing;
             ((System.ComponentModel.ISupportInitialize)pctbAvatar).EndInit();
             information.ResumeLayout(false);
             information.PerformLayout();
             ((System.ComponentModel.ISupportInitialize)pctbMark).EndInit();
+            menuStrip1.ResumeLayout(false);
+            menuStrip1.PerformLayout();
             ResumeLayout(false);
+            PerformLayout();
         }
 
         #endregion
@@ -163,5 +216,10 @@
         private Button Lan;
         private Label rule;
         private System.Windows.Forms.Timer tmCoolDown;
+        private MenuStrip menuStrip1;
+        private ToolStripMenuItem menuToolStripMenuItem;
+        private ToolStripMenuItem undoToolStripMenuItem;
+        private ToolStripMenuItem quitToolStripMenuItem;
+        private ToolStripMenuItem newGameToolStripMenuItem;
     }
 }

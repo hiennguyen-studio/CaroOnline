@@ -19,9 +19,10 @@ namespace CaroOnline.Winforms
 
             tmCoolDown.Interval = Cons.COOL_DOWN_INTERVAL;
 
+            NewGame();
             ChessBoard.DrawChessBoard();
 
-        } 
+        }
 
         void EndGame()
         {
@@ -30,6 +31,16 @@ namespace CaroOnline.Winforms
             pnlChessBoard.Enabled = false;
             MessageBox.Show("kết thúc");
         }
+        void NewGame()
+        {
+            ChessBoard.DrawChessBoard();
+        }
+        void Undo() { }
+        void Quit()
+        { 
+                Application.Exit();
+        }
+
         private void progressBar1_Click(object sender, EventArgs e)
         {
 
@@ -56,7 +67,7 @@ namespace CaroOnline.Winforms
             EndGame();
         }
 
-        private void ChessBoard_PlayerMarked (object sender, EventArgs e)
+        private void ChessBoard_PlayerMarked(object sender, EventArgs e)
         {
             tmCoolDown.Start();
             prcbCoolDown.Value = 0;
@@ -64,12 +75,36 @@ namespace CaroOnline.Winforms
         private void timer1_Tick(object sender, EventArgs e)
         {
 
-            prcbCoolDown.PerformStep(); 
-            if(prcbCoolDown.Value>=prcbCoolDown.Maximum)
+            prcbCoolDown.PerformStep();
+            if (prcbCoolDown.Value >= prcbCoolDown.Maximum)
             {
                 EndGame();
-                
+
             }
+        }
+
+        private void newGameToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            prcbCoolDown.Value = 0;
+            tmCoolDown.Stop();
+
+            NewGame();
+
+        }
+        private void undoToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            Undo();
+        }
+
+        private void quitToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            Quit();
+        }
+
+        private void Form1_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            if (MessageBox.Show("Nhấn OK để thoát", "Thông báo", MessageBoxButtons.OKCancel) != DialogResult.OK)
+                e.Cancel = true;
         }
     }
 }
