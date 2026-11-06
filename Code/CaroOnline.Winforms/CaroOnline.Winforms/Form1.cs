@@ -2,6 +2,7 @@
 using System;
 using System.Windows.Forms;
 using GameCaro;
+using System.Threading.Tasks;
 
 namespace CaroOnline.Winforms
 {
@@ -10,6 +11,10 @@ namespace CaroOnline.Winforms
         #region Properties
 
         ChessBoardManager ChessBoard;
+
+        SocketManager socketManager;
+
+        bool isOnline = false;
 
         public Form1()
         {
@@ -21,11 +26,19 @@ namespace CaroOnline.Winforms
                 pctbMark
             );
 
+            socketManager = new SocketManager();
+
+            socketManager.MessageReceived +=
+                SocketManager_MessageReceived;
+
             ChessBoard.EndeGame += ChessBoard_EndeGame;
+
             ChessBoard.PlayerMarked += ChessBoard_PlayerMarked;
 
             prcbCoolDown.Step = Cons.COOL_DOWN_STEP;
+
             prcbCoolDown.Maximum = Cons.COOL_DOWN_TIME;
+
             prcbCoolDown.Value = 0;
 
             tmCoolDown.Interval = Cons.COOL_DOWN_INTERVAL;
@@ -42,6 +55,7 @@ namespace CaroOnline.Winforms
             tmCoolDown.Stop();
 
             pnlChessBoard.Enabled = false;
+
             undoToolStripMenuItem.Enabled = false;
 
             MessageBox.Show("Kết thúc");
@@ -50,19 +64,113 @@ namespace CaroOnline.Winforms
         void NewGame()
         {
             ChessBoard.NewGame();
+
+            pnlChessBoard.Enabled = true;
+
             undoToolStripMenuItem.Enabled = true;
+
             prcbCoolDown.Value = 0;
+
             tmCoolDown.Stop();
         }
 
         void UndoMove()
         {
-            ChessBoard.Undo();
+            if (ChessBoard.Undo())
+            {
+                tmCoolDown.Stop();
+
+                prcbCoolDown.Value = 0;
+            }
         }
 
         void Quit()
         {
+            socketManager.Close();
+
             Application.Exit();
+        }
+
+        #endregion
+
+        #region Client Connection
+
+        public async Task ConnectToServer()  // Ket noi den Server
+        {
+            bool result = await socketManager.ConnectServer();
+
+            if (result)
+            {
+                isOnline = true;
+
+                MessageBox.Show("Kết nối Server thành công!");
+            }
+            else
+            {
+                MessageBox.Show("Không thể kết nối Server!");
+            }
+        }
+
+        private void SocketManager_MessageReceived(string data) // Nhan du lieu tu Server
+        {
+            if (IsDisposed || !IsHandleCreated)
+                return;
+
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    ProcessServerMessage(data);
+                }));
+
+                return;
+            }
+
+            ProcessServerMessage(data);
+        }
+
+        private void ProcessServerMessage(string data) // Xu ly thong diep Server
+        {
+            try
+            {
+                Message message =
+                    socketManager.DeserializeData<Message>(data);
+
+                switch (message.Type)
+                {
+                    case "CONNECT":
+                        MessageBox.Show("Đã kết nối Server");
+                        break;
+
+                    case "GAME_OVER":
+                        EndGame();
+                        break;
+
+                    case "NEW_GAME":
+                        NewGame();
+                        break;
+
+                    case "INFO":
+                        MessageBox.Show(message.Data);
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    "Lỗi xử lý dữ liệu: " + ex.Message
+                );
+            }
+        }
+
+        private async Task SendMessage(Message message) // Gui thong diep den Server
+        {
+            if (!isOnline)
+                return;
+
+            string data = socketManager.SerializeData(message);
+
+            await socketManager.Send(data);
         }
 
         #endregion
@@ -97,6 +205,7 @@ namespace CaroOnline.Winforms
         private void ChessBoard_PlayerMarked(object sender, EventArgs e)
         {
             tmCoolDown.Start();
+
             prcbCoolDown.Value = 0;
         }
 
@@ -110,34 +219,41 @@ namespace CaroOnline.Winforms
             }
         }
 
-        private void newGameToolStripMenuItem_Click(object sender, EventArgs e)
+        private void newGameToolStripMenuItem_Click(
+            object sender, EventArgs e)
         {
             NewGame();
         }
 
-        private void undoToolStripMenuItem_Click(object sender, EventArgs e)
+        private void undoToolStripMenuItem_Click(
+            object sender, EventArgs e)
         {
             UndoMove();
         }
 
-        private void quitToolStripMenuItem_Click(object sender, EventArgs e)
+        private void quitToolStripMenuItem_Click(
+            object sender, EventArgs e)
         {
             Quit();
         }
 
-        private void Form1_FormClosing(object sender, FormClosingEventArgs e)
+        private void Form1_FormClosing(
+            object sender, FormClosingEventArgs e)
         {
             if (MessageBox.Show(
                 "Nhấn OK để thoát",
                 "Thông báo",
                 MessageBoxButtons.OKCancel
-                ) != DialogResult.OK)
+            ) != DialogResult.OK)
             {
                 e.Cancel = true;
+            }
+            else
+            {
+                socketManager.Close();
             }
         }
 
         #endregion
     }
 }
-

@@ -187,6 +187,37 @@ namespace GameCaro
 
             return true;
         }
+
+        public void ApplyRemoteMove(Point point, int playerIndex)
+        {
+            if (point.X < 0 || point.X >= Cons.CHESS_BOARD_WIDTH)
+                return;
+
+            if (point.Y < 0 || point.Y >= Cons.CHESS_BOARD_HEIGHT)
+                return;
+
+            if (Matrix[point.Y][point.X].BackgroundImage != null)
+                return;
+
+            CurrentPlayer = playerIndex;
+
+            Button btn = Matrix[point.Y][point.X];
+
+            Mark(btn);
+
+            PlayTimeLine.Push(new PlayInfo(point, CurrentPlayer));
+
+            if (isEndGame(btn))
+            {
+                EndGame();
+                return;
+            }
+
+            CurrentPlayer = (CurrentPlayer == 0) ? 1 : 0;
+
+            ChangePlayer();
+        }
+
         private bool isEndGame(Button btn)
         {
             Point point = GetChessPoint(btn);
