@@ -6,6 +6,7 @@ using System.Linq;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -16,13 +17,21 @@ namespace CaroOnline.Winforms
     {
         #region Properties
 
-        public static string IP = "127.0.0.1";
+        private static readonly ClientNetworkSettings defaultSettings = ClientNetworkSettings.Load();
 
-        public static int PORT = 9999;
+        private readonly ClientNetworkSettings settings = ClientNetworkSettings.Load();
 
-        private TcpListener server;
+        public static string IP = defaultSettings.ServerAddress;
 
-        private TcpClient client;
+        public static int PORT = defaultSettings.ServerPort;
+
+        private TcpListener? server;
+
+        private TcpClient? client;
+
+        private readonly ConcurrentDictionary<TcpClient, SemaphoreSlim> clientSendLocks = new();
+
+        private readonly SemaphoreSlim serverClientSendLock = new(1, 1);
 
         private readonly ConcurrentDictionary<int, TcpClient>
             clients = new ConcurrentDictionary<int, TcpClient>();
@@ -31,13 +40,17 @@ namespace CaroOnline.Winforms
 
         private bool isServer = false;
 
-        private CancellationTokenSource cancellation;
+        private CancellationTokenSource? cancellation;
 
-        public event Action<string> MessageReceived;
+        public event Action<string>? MessageReceived;
 
-        public event Action<int> ClientConnected;
+        public event Action<int>? ClientConnected;
 
-        public event Action<int> ClientDisconnected;
+        public event Action<int>? ClientDisconnected;
+
+        public event Action? Disconnected;
+
+        public bool IsConnected => client?.Connected == true;
 
         #endregion
 
@@ -45,15 +58,34 @@ namespace CaroOnline.Winforms
 
         public async Task<bool> ConnectServer() // Ket noi den Server
         {
+            return await ConnectServer(IP, PORT, Environment.UserName, string.Empty);
+        }
+
+        public async Task<bool> ConnectServer(string host, int port, string playerName, string resumeToken = "")
+        {
             try
             {
-                client = new TcpClient();
+                if (string.IsNullOrWhiteSpace(host) || port is < 1 or > 65535)
+                    return false;
 
-                await client.ConnectAsync(IP, PORT);
+                TcpClient connectedClient = new();
+                using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(settings.ConnectTimeoutSeconds));
+                await connectedClient.ConnectAsync(host, port, timeout.Token);
+                client?.Close();
+                client = connectedClient;
+                IP = host;
+                PORT = port;
 
                 isServer = false;
 
-                _ = ReceiveClientLoop();
+                _ = ReceiveClientLoop(connectedClient);
+
+                await Send(JsonSerializer.Serialize(new Message
+                {
+                    Type = "HELLO",
+                    Name = playerName,
+                    ResumeToken = resumeToken
+                }));
 
                 return true;
             }
@@ -65,13 +97,13 @@ namespace CaroOnline.Winforms
             }
         }
 
-        private async Task ReceiveClientLoop() // Nhan du lieu tu Server
+        private async Task ReceiveClientLoop(TcpClient connectedClient) // Nhan du lieu tu Server
         {
             try
             {
-                while (client != null && client.Connected)
+                while (ReferenceEquals(client, connectedClient) && connectedClient.Connected)
                 {
-                    string message = await ReceiveData(client);
+                    string? message = await ReceiveData(connectedClient);
 
                     if (message == null)
                         break;
@@ -82,6 +114,15 @@ namespace CaroOnline.Winforms
             catch (Exception ex)
             {
                 Console.WriteLine("Loi nhan du lieu: " + ex.Message);
+            }
+            finally
+            {
+                if (ReferenceEquals(client, connectedClient))
+                {
+                    client = null;
+                    connectedClient.Close();
+                    Disconnected?.Invoke();
+                }
             }
         }
 
@@ -134,7 +175,7 @@ namespace CaroOnline.Winforms
             {
                 while (client.Connected)
                 {
-                    string message = await ReceiveData(client);
+                    string? message = await ReceiveData(client);
 
                     if (message == null)
                         break;
@@ -209,29 +250,38 @@ namespace CaroOnline.Winforms
             return JsonSerializer.Serialize(data);
         }
 
-        public T DeserializeData<T>(string data) // Giai ma du lieu JSON
+        public T? DeserializeData<T>(string data) // Giai ma du lieu JSON
         {
             return JsonSerializer.Deserialize<T>(data);
         }
 
         private async Task SendData(TcpClient target, string message)
         {
-            byte[] data = System.Text.Encoding.UTF8.GetBytes(message);
+            byte[] data = Encoding.UTF8.GetBytes(message);
+
+            if (data.Length > settings.MaxFrameBytes)
+                throw new InvalidDataException("Message exceeds the configured frame limit.");
 
             byte[] length = BitConverter.GetBytes(
                 IPAddress.HostToNetworkOrder(data.Length)
             );
 
             NetworkStream stream = target.GetStream();
-
-            await stream.WriteAsync(length, 0, length.Length);
-
-            await stream.WriteAsync(data, 0, data.Length);
-
-            await stream.FlushAsync();
+            SemaphoreSlim sendLock = clientSendLocks.GetOrAdd(target, _ => new SemaphoreSlim(1, 1));
+            await sendLock.WaitAsync();
+            try
+            {
+                await stream.WriteAsync(length);
+                await stream.WriteAsync(data);
+                await stream.FlushAsync();
+            }
+            finally
+            {
+                sendLock.Release();
+            }
         }
 
-        private async Task<string> ReceiveData(TcpClient target) // Nhan du lieu TCP
+        private async Task<string?> ReceiveData(TcpClient target) // Nhan du lieu TCP
         {
             NetworkStream stream = target.GetStream();
 
@@ -241,22 +291,24 @@ namespace CaroOnline.Winforms
 
             if (read == 0)
                 return null;
+            if (read != lengthBuffer.Length)
+                throw new EndOfStreamException("Connection closed during the frame header.");
 
             int length = IPAddress.NetworkToHostOrder(
                 BitConverter.ToInt32(lengthBuffer, 0)
             );
 
-            if (length <= 0 || length > 1024 * 1024)
+            if (length <= 0 || length > settings.MaxFrameBytes)
                 throw new InvalidDataException("Du lieu khong hop le");
 
             byte[] data = new byte[length];
 
             read = await ReadExact(stream, data, length);
 
-            if (read == 0)
+            if (read != length)
                 throw new EndOfStreamException();
 
-            return System.Text.Encoding.UTF8.GetString(data);
+            return Encoding.UTF8.GetString(data);
         }
 
         private async Task<int> ReadExact(
@@ -268,11 +320,7 @@ namespace CaroOnline.Winforms
 
             while (total < length)
             {
-                int read = await stream.ReadAsync(
-                    buffer,
-                    total,
-                    length - total
-                );
+                int read = await stream.ReadAsync(buffer.AsMemory(total, length - total));
 
                 if (read == 0)
                     return 0;
@@ -311,6 +359,8 @@ namespace CaroOnline.Winforms
             cancellation?.Cancel();
 
             client?.Close();
+
+            client = null;
 
             StopServer();
         }

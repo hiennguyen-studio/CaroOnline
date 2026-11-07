@@ -1,0 +1,6 @@
+{
+  "ServerAddress": "127.0.0.1",
+  "ServerPort": 9999,
+  "ConnectTimeoutSeconds": 10,
+  "MaxFrameBytes": 65536
+}
