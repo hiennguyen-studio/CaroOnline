@@ -13,6 +13,8 @@ namespace CaroOnline.Server
 {
     public class ServerSocketManager
     {
+        private readonly RoomServerManager roomServer;
+
         private TcpListener? listener;
 
         private readonly ConcurrentDictionary<int, TcpClient> clients
@@ -31,55 +33,20 @@ namespace CaroOnline.Server
 
         public event Action<int>? ClientCountChanged;
 
-        public bool IsRunning { get; private set; }
+        public bool IsRunning => roomServer.IsRunning;
+
+        public int ConnectedClientCount => roomServer.ConnectedClientCount;
+
+        public ServerSocketManager(ServerSettings? settings = null)
+        {
+            roomServer = new RoomServerManager(settings);
+            roomServer.LogReceived += message => LogReceived?.Invoke(message);
+            roomServer.ClientCountChanged += count => ClientCountChanged?.Invoke(count);
+        }
 
         public async Task StartServer()
         {
-            if (IsRunning)
-                return;
-
-            try
-            {
-                cancellation = new CancellationTokenSource();
-
-                listener = new TcpListener(IPAddress.Any, 9999);
-
-                listener.Start();
-
-                IsRunning = true;
-
-                Log("Server đang chạy tại cổng 9999.");
-
-                while (!cancellation.IsCancellationRequested)
-                {
-                    TcpClient client =
-                        await listener.AcceptTcpClientAsync(
-                            cancellation.Token);
-
-                    _ = HandleClient(client);
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                Log("Server đã dừng nhận kết nối.");
-            }
-            catch (ObjectDisposedException)
-            {
-                // Listener đã được đóng.
-            }
-            catch (SocketException ex)
-            {
-                if (IsRunning)
-                    Log("Lỗi Socket: " + ex.Message);
-            }
-            catch (Exception ex)
-            {
-                Log("Lỗi Server: " + ex.Message);
-            }
-            finally
-            {
-                IsRunning = false;
-            }
+            await roomServer.StartServer();
         }
 
         private async Task HandleClient(TcpClient client)
@@ -339,25 +306,7 @@ namespace CaroOnline.Server
 
         public void StopServer()
         {
-            if (!IsRunning)
-                return;
-
-            IsRunning = false;
-
-            cancellation?.Cancel();
-
-            listener?.Stop();
-
-            foreach (var item in clients)
-            {
-                item.Value.Close();
-            }
-
-            clients.Clear();
-
-            ClientCountChanged?.Invoke(0);
-
-            Log("Server đã dừng.");
+            roomServer.StopServer();
         }
 
         private void Log(string message)

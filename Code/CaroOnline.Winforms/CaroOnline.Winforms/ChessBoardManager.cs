@@ -13,15 +13,27 @@ namespace GameCaro
 {
     public class ChessBoardManager
     {
+        private static readonly Color CellColor = Color.FromArgb(250, 248, 245);
+        private static readonly Color CellHoverColor = Color.FromArgb(231, 240, 249);
+        private static readonly Color CellBorderColor = Color.FromArgb(204, 216, 228);
+        private static readonly Color RecentMoveBorderColor = Color.FromArgb(224, 145, 44);
+        private Button? lastMoveButton;
+
         #region Properties
-        private Panel chessBoard;
+        private Panel chessBoard = null!;
         public Panel ChessBoard
         {
             get { return chessBoard; }
             set { chessBoard = value; }
         }
 
-        private List<Player> player;
+        public bool IsOnlineMode { get; set; }
+
+        public bool CanMakeOnlineMove { get; set; } = true;
+
+        public event Action<Point, int>? OnlineMoveRequested;
+
+        private List<Player> player = null!;
         public List<Player> Player
         {
             get { return player; }
@@ -35,35 +47,35 @@ namespace GameCaro
             set { currentPlayer = value; }
         }
 
-        private TextBox playerName;
+        private TextBox playerName = null!;
         public TextBox PlayerName
         {
             get { return playerName; }
             set { playerName = value; }
         }
 
-        private PictureBox markPlayer;
+        private PictureBox markPlayer = null!;
         public PictureBox MarkPlayer
         {
             get { return markPlayer; }
             set { markPlayer = value; }
         }
 
-        private List<List<Button>> matrix;
+        private List<List<Button>> matrix = null!;
         public List<List<Button>> Matrix
         {
             get { return matrix; }
             set { matrix = value; }
         }
 
-        private event EventHandler playerMarked;
+        private event EventHandler? playerMarked;
         public event EventHandler PlayerMarked
         {
             add { playerMarked += value; }
             remove { playerMarked -= value; }
         }
 
-        private event EventHandler endeGame;
+        private event EventHandler? endeGame;
         public event EventHandler EndeGame
         {
             add { endeGame += value; }
@@ -72,6 +84,8 @@ namespace GameCaro
         #endregion
 
         private Stack<PlayInfo> PlayTimeLine;
+
+        public int MoveCount => PlayTimeLine.Count;
 
         #region Initialize
         public ChessBoardManager(Panel chessBoard, TextBox playerName, PictureBox markPlayer)
@@ -98,47 +112,98 @@ namespace GameCaro
         #region Methods
         public void DrawChessBoard()
         {
+            ChessBoard.SuspendLayout();
             ChessBoard.Enabled = true;
+            ChessBoard.AutoScroll = false;
+            ChessBoard.BackColor = CellColor;
             ChessBoard.Controls.Clear();
             Matrix = new List<List<Button>>();
-            Button oldButton = new Button() { Width = 0, Location = new Point(0, 0) };
+            lastMoveButton = null;
 
             for (int i = 0; i < Cons.CHESS_BOARD_HEIGHT; i++)
             {
                 Matrix.Add(new List<Button>());
-                for (int j = 0; j <= Cons.CHESS_BOARD_WIDTH; j++)
+                for (int j = 0; j < Cons.CHESS_BOARD_WIDTH; j++)
                 {
                     Button btn = new Button()
                     {
                         Width = Cons.CHESS_WIDTH,
                         Height = Cons.CHESS_HEIGHT,
-                        Location = new Point(oldButton.Location.X + oldButton.Width, oldButton.Location.Y),
-                        BackgroundImageLayout = ImageLayout.Stretch,
+                        Location = new Point(j * Cons.CHESS_WIDTH, i * Cons.CHESS_HEIGHT),
+                        BackgroundImageLayout = ImageLayout.Zoom,
+                        FlatStyle = FlatStyle.Flat,
+                        Margin = Padding.Empty,
+                        Padding = Padding.Empty,
+                        BackColor = CellColor,
+                        UseVisualStyleBackColor = false,
+                        Cursor = Cursors.Hand,
                         Tag = i.ToString()
                     };
 
+                    btn.FlatAppearance.BorderSize = 1;
+                    btn.FlatAppearance.BorderColor = CellBorderColor;
+                    btn.FlatAppearance.MouseOverBackColor = CellHoverColor;
+                    btn.FlatAppearance.MouseDownBackColor = Color.FromArgb(220, 232, 244);
                     btn.Click += btn_Click;
+                    btn.MouseEnter += (_, _) =>
+                    {
+                        if (btn.BackgroundImage == null && btn != lastMoveButton)
+                            btn.BackColor = CellHoverColor;
+                    };
+                    btn.MouseLeave += (_, _) =>
+                    {
+                        if (btn != lastMoveButton)
+                            btn.BackColor = CellColor;
+                    };
                     chessBoard.Controls.Add(btn);
                     Matrix[i].Add(btn);
-
-                    oldButton = btn;
                 }
-                oldButton.Location = new Point(0, oldButton.Location.Y + Cons.CHESS_HEIGHT);
-                oldButton.Width = 0;
-                oldButton.Height = 0;
             }
+            ChessBoard.ResumeLayout(true);
+        }
+
+        public void SetCellSize(int cellSize)
+        {
+            if (cellSize <= 0 || Matrix == null)
+                return;
+
+            Cons.CHESS_WIDTH = cellSize;
+            Cons.CHESS_HEIGHT = cellSize;
+            ChessBoard.SuspendLayout();
+            for (int y = 0; y < Matrix.Count; y++)
+            {
+                for (int x = 0; x < Matrix[y].Count; x++)
+                {
+                    Button cell = Matrix[y][x];
+                    cell.Size = new Size(cellSize, cellSize);
+                    cell.Location = new Point(x * cellSize, y * cellSize);
+                }
+            }
+            ChessBoard.Size = new Size(cellSize * Cons.CHESS_BOARD_WIDTH,
+                cellSize * Cons.CHESS_BOARD_HEIGHT);
+            ChessBoard.ResumeLayout(true);
         }
 
         private void btn_Click(object? sender, EventArgs e)
         {
-            Button btn = sender as Button;
+            if (sender is not Button btn)
+                return;
 
             if (btn.BackgroundImage != null)
                 return;
 
+            if (IsOnlineMode)
+            {
+                if (CanMakeOnlineMove)
+                    OnlineMoveRequested?.Invoke(GetChessPoint(btn), CurrentPlayer);
+                return;
+            }
+
             Mark(btn);
 
             PlayTimeLine.Push(new PlayInfo(GetChessPoint(btn), CurrentPlayer));
+
+            HighlightRecentMove(btn);
 
             currentPlayer = (currentPlayer == 1) ? 0 : 1;
 
@@ -163,6 +228,8 @@ namespace GameCaro
         {
             PlayTimeLine.Clear();
 
+            lastMoveButton = null;
+
             CurrentPlayer = 0;
 
             ChangePlayer();
@@ -180,6 +247,10 @@ namespace GameCaro
             Button btn = Matrix[playInfo.Point.Y][playInfo.Point.X];
 
             btn.BackgroundImage = null;
+
+            HighlightRecentMove(PlayTimeLine.Count > 0
+                ? Matrix[PlayTimeLine.Peek().Point.Y][PlayTimeLine.Peek().Point.X]
+                : null);
 
             CurrentPlayer = playInfo.currentPlayer;
 
@@ -207,6 +278,8 @@ namespace GameCaro
 
             PlayTimeLine.Push(new PlayInfo(point, CurrentPlayer));
 
+            HighlightRecentMove(btn);
+
             if (isEndGame(btn))
             {
                 EndGame();
@@ -215,6 +288,32 @@ namespace GameCaro
 
             CurrentPlayer = (CurrentPlayer == 0) ? 1 : 0;
 
+            ChangePlayer();
+        }
+
+        public void ApplyRemoteSnapshot(int[] board, int currentPlayer)
+        {
+            if (board == null || board.Length != Cons.CHESS_BOARD_WIDTH * Cons.CHESS_BOARD_HEIGHT)
+                return;
+
+            PlayTimeLine.Clear();
+            lastMoveButton = null;
+            for (int y = 0; y < Cons.CHESS_BOARD_HEIGHT; y++)
+            {
+                for (int x = 0; x < Cons.CHESS_BOARD_WIDTH; x++)
+                {
+                    int cell = board[y * Cons.CHESS_BOARD_WIDTH + x];
+                    if (cell is < 1 or > 2)
+                        continue;
+
+                    CurrentPlayer = cell - 1;
+                    Button button = Matrix[y][x];
+                    Mark(button);
+                    PlayTimeLine.Push(new PlayInfo(new Point(x, y), CurrentPlayer));
+                }
+            }
+
+            CurrentPlayer = currentPlayer is 0 or 1 ? currentPlayer : 0;
             ChangePlayer();
         }
 
@@ -355,7 +454,24 @@ namespace GameCaro
         private void Mark(Button btn)
         {
             btn.BackgroundImage = Player[currentPlayer].Mark;
+            btn.BackColor = CellColor;
 
+        }
+
+        private void HighlightRecentMove(Button? button)
+        {
+            if (lastMoveButton != null)
+            {
+                lastMoveButton.FlatAppearance.BorderColor = CellBorderColor;
+                lastMoveButton.FlatAppearance.BorderSize = 1;
+            }
+
+            lastMoveButton = button;
+            if (lastMoveButton != null)
+            {
+                lastMoveButton.FlatAppearance.BorderColor = RecentMoveBorderColor;
+                lastMoveButton.FlatAppearance.BorderSize = 3;
+            }
         }
 
         private void ChangePlayer()

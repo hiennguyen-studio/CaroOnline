@@ -100,7 +100,7 @@
             Lan.Name = "Lan";
             Lan.Size = new Size(112, 37);
             Lan.TabIndex = 4;
-            Lan.Text = "button1";
+            Lan.Text = "Rời phòng / Chọn phòng";
             Lan.UseVisualStyleBackColor = true;
             Lan.Click += button1_Click;
             // 
@@ -185,7 +185,9 @@
             // 
             AutoScaleDimensions = new SizeF(8F, 20F);
             AutoScaleMode = AutoScaleMode.Font;
-            ClientSize = new Size(1122, 737);
+            ClientSize = new Size(1280, 900);
+            MinimumSize = new Size(960, 680);
+            StartPosition = FormStartPosition.CenterScreen;
             Controls.Add(information);
             Controls.Add(pctbAvatar);
             Controls.Add(pnlChessBoard);

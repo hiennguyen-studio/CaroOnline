@@ -10,7 +10,9 @@ namespace CaroOnline.Server
 
         private int[,] board = new int[ROWS, COLS];
 
-        private Stack<Point> history = new Stack<Point>();
+        private readonly Stack<Point> history = new Stack<Point>();
+
+        private readonly List<MatchMove> moveHistory = new List<MatchMove>();
 
         public int CurrentPlayer { get; private set; } = 0;
 
@@ -38,6 +40,14 @@ namespace CaroOnline.Server
 
             history.Push(new Point(x, y));
 
+            moveHistory.Add(new MatchMove
+            {
+                X = x,
+                Y = y,
+                PlayerIndex = player,
+                PlayedAtUtc = DateTime.UtcNow
+            });
+
             CurrentPlayer = 1 - CurrentPlayer;
 
             return true;
@@ -52,6 +62,9 @@ namespace CaroOnline.Server
 
             board[p.Y, p.X] = 0;
 
+            if (moveHistory.Count > 0)
+                moveHistory.RemoveAt(moveHistory.Count - 1);
+
             CurrentPlayer = 1 - CurrentPlayer;
 
             return true;
@@ -63,6 +76,8 @@ namespace CaroOnline.Server
 
             history.Clear();
 
+            moveHistory.Clear();
+
             CurrentPlayer = 0;
 
             IsGameOver = false;
@@ -70,6 +85,10 @@ namespace CaroOnline.Server
 
         public bool CheckWinner(int x, int y, int player)
         {
+            if (player < 0 || player > 1 || x < 0 || x >= COLS ||
+                y < 0 || y >= ROWS || board[y, x] != player + 1)
+                return false;
+
             int value = player + 1;
 
             int[,] directions =
@@ -104,6 +123,39 @@ namespace CaroOnline.Server
         public bool IsBoardFull()
         {
             return history.Count == ROWS * COLS;
+        }
+
+        public int[] GetBoardSnapshot()
+        {
+            int[] snapshot = new int[ROWS * COLS];
+            for (int y = 0; y < ROWS; y++)
+            {
+                for (int x = 0; x < COLS; x++)
+                    snapshot[y * COLS + x] = board[y, x];
+            }
+
+            return snapshot;
+        }
+
+        public List<MatchMove> GetMoveHistory()
+        {
+            return moveHistory.Select(move => new MatchMove
+            {
+                X = move.X,
+                Y = move.Y,
+                PlayerIndex = move.PlayerIndex,
+                PlayedAtUtc = move.PlayedAtUtc
+            }).ToList();
+        }
+
+        public void FinishInDraw()
+        {
+            FinishGame();
+        }
+
+        public void FinishGame()
+        {
+            IsGameOver = true;
         }
 
         private int CountDirection(
