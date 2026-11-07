@@ -1,29 +1,24 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
+﻿
+using System;
+using System.Drawing;
 
 namespace CaroOnline.Winforms
 {
+    [Serializable]
     public class PlayInfo
     {
-        private Point point;
-        public Point Point
-        {
-            get { return point; }
-            set { point = value; }
-        }
+        public Point Point { get; set; }
 
-        private int CurrentPlayer;
-        public int currentPlayer
+        public int currentPlayer { get; set; }
+
+        public PlayInfo()
         {
-            get { return CurrentPlayer; }
-            set { CurrentPlayer = value; }
         }
 
         public PlayInfo(Point point, int currentPlayer)
         {
-            this.point = point;
-            this.CurrentPlayer = currentPlayer;
+            Point = point;
+            this.currentPlayer = currentPlayer;
         }
     }
 }
