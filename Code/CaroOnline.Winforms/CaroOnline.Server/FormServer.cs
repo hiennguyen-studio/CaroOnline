@@ -9,6 +9,7 @@ namespace CaroOnline.Server
         private ServerSocketManager server;
         private Database database;
         private bool isDatabaseConnected = false;
+        private AuthServer? authServer;
 
         public FormServer()
         {
@@ -86,6 +87,9 @@ namespace CaroOnline.Server
             }
 
             _ = server.StartServer();
+            authServer = new AuthServer(database);
+            authServer.Log += Server_LogReceived;
+            authServer.Start();
 
             lblStatus.Text = "Server đang chạy";
 
@@ -96,6 +100,8 @@ namespace CaroOnline.Server
         private void button2_Click(object sender, EventArgs e)
         {
             server.StopServer();
+            authServer?.Stop();
+            authServer = null;
 
             lblStatus.Text = "Server đang dừng";
 
