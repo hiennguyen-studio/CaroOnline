@@ -7,8 +7,6 @@ namespace CaroOnline.Server
     public partial class FormServer : Form
     {
         private ServerSocketManager server;
-        private Database database;
-        private bool isDatabaseConnected = false;
 
         public FormServer()
         {
@@ -25,65 +23,12 @@ namespace CaroOnline.Server
             listBox1.Items.Clear();
 
             button2.Enabled = false;
-            CheckDatabaseConnection();
-        }
-        private void CheckDatabaseConnection()
-        {
-            database = new Database();
-
-            if (database.TestConnection(out string error))
-            {
-                isDatabaseConnected = true;
-
-                lblStatus.Text = "Database đã kết nối";
-
-                richTextBox1.AppendText(
-                    "Database kết nối thành công!" +
-                    Environment.NewLine
-                );
-
-                button1.Enabled = true;
-            }
-            else
-            {
-                isDatabaseConnected = false;
-
-                lblStatus.Text = "Database mất kết nối";
-
-                richTextBox1.AppendText(
-                    "Database kết nối thất bại!" +
-                    Environment.NewLine +
-                    "Lỗi: " + error +
-                    Environment.NewLine
-                );
-
-                button1.Enabled = false;
-
-                MessageBox.Show(
-                    "Không thể kết nối Database!\n" + error,
-                    "Database Error",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error
-                );
-            }
         }
 
         private void button1_Click(object sender, EventArgs e)
         {
             if (server.IsRunning)
                 return;
-
-            if (!isDatabaseConnected)
-            {
-                MessageBox.Show(
-                    "Database chưa kết nối!",
-                    "Thông báo",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning
-                );
-
-                return;
-            }
 
             _ = server.StartServer();
 
@@ -141,11 +86,6 @@ namespace CaroOnline.Server
             FormClosingEventArgs e)
         {
             server.StopServer();
-        }
-
-        private void label2_Click(object sender, EventArgs e)
-        {
-
         }
     }
 }
