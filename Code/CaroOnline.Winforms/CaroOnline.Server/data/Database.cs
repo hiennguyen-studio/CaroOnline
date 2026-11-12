@@ -20,8 +20,8 @@ namespace CaroOnline.Server
         private readonly string connectionString =
             "Server=100.103.157.39,1433;" +
             "Database=CaroOnlineDB;" +
-            "User Id=caro_member_admin;" +
-            "Password=admin123456;" +
+            "User Id=caro_member_tk;" +
+            "Password=mk;" +
             "TrustServerCertificate=True;";
 
         // Hash SHA256 (hex in hoa), khớp với HASHBYTES trong SQL

@@ -16,7 +16,7 @@ namespace CaroOnline.Winforms
             {
                 if (login.ShowDialog() != DialogResult.OK) return;
             }
-            Application.Run(new Form1());
+            Application.Run(new FormLobby());
         }
     }
 }
