@@ -13,10 +13,16 @@ namespace GameCaro
 {
     public class ChessBoardManager
     {
-        private static readonly Color CellColor = Color.FromArgb(250, 248, 245);
-        private static readonly Color CellHoverColor = Color.FromArgb(231, 240, 249);
-        private static readonly Color CellBorderColor = Color.FromArgb(204, 216, 228);
-        private static readonly Color RecentMoveBorderColor = Color.FromArgb(224, 145, 44);
+        private readonly int boardWidth;
+        private readonly int boardHeight;
+        private readonly bool cyberpunkTheme;
+        private int cellWidth;
+        private int cellHeight;
+        private readonly Color CellColor;
+        private readonly Color CellHoverColor;
+        private readonly Color CellBorderColor;
+        private readonly Color RecentMoveBorderColor;
+        private readonly Color RecentMoveBackColor;
         private Button? lastMoveButton;
 
         #region Properties
@@ -86,10 +92,27 @@ namespace GameCaro
         private Stack<PlayInfo> PlayTimeLine;
 
         public int MoveCount => PlayTimeLine.Count;
+        public PlayInfo? LastMove => PlayTimeLine.Count == 0 ? null : PlayTimeLine.Peek();
 
         #region Initialize
         public ChessBoardManager(Panel chessBoard, TextBox playerName, PictureBox markPlayer)
+            : this(chessBoard, playerName, markPlayer, Cons.CHESS_BOARD_WIDTH, Cons.CHESS_BOARD_HEIGHT, false)
         {
+        }
+
+        public ChessBoardManager(Panel chessBoard, TextBox playerName, PictureBox markPlayer,
+            int boardWidth, int boardHeight, bool cyberpunkTheme)
+        {
+            this.boardWidth = Math.Max(1, boardWidth);
+            this.boardHeight = Math.Max(1, boardHeight);
+            this.cyberpunkTheme = cyberpunkTheme;
+            cellWidth = Cons.CHESS_WIDTH;
+            cellHeight = Cons.CHESS_HEIGHT;
+            CellColor = cyberpunkTheme ? ColorTranslator.FromHtml("#131D2B") : Color.FromArgb(250, 248, 245);
+            CellHoverColor = cyberpunkTheme ? ColorTranslator.FromHtml("#1B2A3D") : Color.FromArgb(231, 240, 249);
+            CellBorderColor = cyberpunkTheme ? ColorTranslator.FromHtml("#1E2F45") : Color.FromArgb(204, 216, 228);
+            RecentMoveBorderColor = cyberpunkTheme ? ColorTranslator.FromHtml("#38BDF8") : Color.FromArgb(224, 145, 44);
+            RecentMoveBackColor = cyberpunkTheme ? ColorTranslator.FromHtml("#1A2A3C") : CellColor;
             this.ChessBoard = chessBoard;
             this.PlayerName = playerName;
             this.MarkPlayer = markPlayer;
@@ -120,16 +143,16 @@ namespace GameCaro
             Matrix = new List<List<Button>>();
             lastMoveButton = null;
 
-            for (int i = 0; i < Cons.CHESS_BOARD_HEIGHT; i++)
+            for (int i = 0; i < boardHeight; i++)
             {
                 Matrix.Add(new List<Button>());
-                for (int j = 0; j < Cons.CHESS_BOARD_WIDTH; j++)
+                for (int j = 0; j < boardWidth; j++)
                 {
                     Button btn = new Button()
                     {
-                        Width = Cons.CHESS_WIDTH,
-                        Height = Cons.CHESS_HEIGHT,
-                        Location = new Point(j * Cons.CHESS_WIDTH, i * Cons.CHESS_HEIGHT),
+                        Width = cellWidth,
+                        Height = cellHeight,
+                        Location = new Point(j * cellWidth, i * cellHeight),
                         BackgroundImageLayout = ImageLayout.Zoom,
                         FlatStyle = FlatStyle.Flat,
                         Margin = Padding.Empty,
@@ -143,7 +166,9 @@ namespace GameCaro
                     btn.FlatAppearance.BorderSize = 1;
                     btn.FlatAppearance.BorderColor = CellBorderColor;
                     btn.FlatAppearance.MouseOverBackColor = CellHoverColor;
-                    btn.FlatAppearance.MouseDownBackColor = Color.FromArgb(220, 232, 244);
+                    btn.FlatAppearance.MouseDownBackColor = cyberpunkTheme
+                        ? ColorTranslator.FromHtml("#20364D")
+                        : Color.FromArgb(220, 232, 244);
                     btn.Click += btn_Click;
                     btn.MouseEnter += (_, _) =>
                     {
@@ -167,8 +192,8 @@ namespace GameCaro
             if (cellSize <= 0 || Matrix == null)
                 return;
 
-            Cons.CHESS_WIDTH = cellSize;
-            Cons.CHESS_HEIGHT = cellSize;
+            cellWidth = cellSize;
+            cellHeight = cellSize;
             ChessBoard.SuspendLayout();
             for (int y = 0; y < Matrix.Count; y++)
             {
@@ -179,8 +204,7 @@ namespace GameCaro
                     cell.Location = new Point(x * cellSize, y * cellSize);
                 }
             }
-            ChessBoard.Size = new Size(cellSize * Cons.CHESS_BOARD_WIDTH,
-                cellSize * Cons.CHESS_BOARD_HEIGHT);
+            ChessBoard.Size = new Size(cellWidth * boardWidth, cellHeight * boardHeight);
             ChessBoard.ResumeLayout(true);
         }
 
@@ -261,10 +285,10 @@ namespace GameCaro
 
         public void ApplyRemoteMove(Point point, int playerIndex)
         {
-            if (point.X < 0 || point.X >= Cons.CHESS_BOARD_WIDTH)
+            if (point.X < 0 || point.X >= boardWidth)
                 return;
 
-            if (point.Y < 0 || point.Y >= Cons.CHESS_BOARD_HEIGHT)
+            if (point.Y < 0 || point.Y >= boardHeight)
                 return;
 
             if (Matrix[point.Y][point.X].BackgroundImage != null)
@@ -293,16 +317,16 @@ namespace GameCaro
 
         public void ApplyRemoteSnapshot(int[] board, int currentPlayer)
         {
-            if (board == null || board.Length != Cons.CHESS_BOARD_WIDTH * Cons.CHESS_BOARD_HEIGHT)
+            if (board == null || board.Length != boardWidth * boardHeight)
                 return;
 
             PlayTimeLine.Clear();
             lastMoveButton = null;
-            for (int y = 0; y < Cons.CHESS_BOARD_HEIGHT; y++)
+            for (int y = 0; y < boardHeight; y++)
             {
-                for (int x = 0; x < Cons.CHESS_BOARD_WIDTH; x++)
+                for (int x = 0; x < boardWidth; x++)
                 {
-                    int cell = board[y * Cons.CHESS_BOARD_WIDTH + x];
+                    int cell = board[y * boardWidth + x];
                     if (cell is < 1 or > 2)
                         continue;
 
@@ -333,9 +357,9 @@ namespace GameCaro
 
             if (horizontal == -1)
             {
-                for (int i = 0; i < Cons.CHESS_BOARD_HEIGHT; i++)
+                    for (int i = 0; i < boardHeight; i++)
                 {
-                    for (int j = 0; j < Cons.CHESS_BOARD_WIDTH; j++)
+                        for (int j = 0; j < boardWidth; j++)
                     {
                         if (Matrix[i][j] == btn)
                             return new Point(j, i);
@@ -359,7 +383,7 @@ namespace GameCaro
             }
 
             int contRight = 0;
-            for (int i = point.X + 1; i < Cons.CHESS_BOARD_WIDTH; i++)
+            for (int i = point.X + 1; i < boardWidth; i++)
             {
                 if (Matrix[point.Y][i].BackgroundImage == btn.BackgroundImage)
                     contRight++;
@@ -383,7 +407,7 @@ namespace GameCaro
             }
 
             int countBottom = 0;
-            for (int i = point.Y + 1; i < Cons.CHESS_BOARD_HEIGHT; i++)
+            for (int i = point.Y + 1; i < boardHeight; i++)
             {
                 if (Matrix[i][point.X].BackgroundImage == btn.BackgroundImage)
                     countBottom++;
@@ -399,7 +423,7 @@ namespace GameCaro
         {
             Point point = GetChessPoint(btn);
             int countTop = 0;
-            for (int i = 0; i < Cons.CHESS_BOARD_WIDTH; i++)
+            for (int i = 0; i < boardWidth; i++)
             {
                 if (point.Y - i < 0 || point.X - i < 0)
                     break;
@@ -410,9 +434,9 @@ namespace GameCaro
             }
 
             int countBottom = 0;
-            for (int i = 1; i < Cons.CHESS_BOARD_WIDTH; i++)
+            for (int i = 1; i < boardWidth; i++)
             {
-                if (point.Y + i >= Cons.CHESS_BOARD_HEIGHT || point.X + i >= Cons.CHESS_BOARD_WIDTH)
+                if (point.Y + i >= boardHeight || point.X + i >= boardWidth)
                     break;
                 if (Matrix[point.Y + i][point.X + i].BackgroundImage == btn.BackgroundImage)
                     countBottom++;
@@ -427,9 +451,9 @@ namespace GameCaro
         {
             Point point = GetChessPoint(btn);
             int countTop = 0;
-            for (int i = 0; i < Cons.CHESS_BOARD_WIDTH; i++)
+            for (int i = 0; i < boardWidth; i++)
             {
-                if (point.Y - i < 0 || point.X + i >= Cons.CHESS_BOARD_WIDTH)
+                if (point.Y - i < 0 || point.X + i >= boardWidth)
                     break;
                 if (Matrix[point.Y - i][point.X + i].BackgroundImage == btn.BackgroundImage)
                     countTop++;
@@ -438,9 +462,9 @@ namespace GameCaro
             }
 
             int countBottom = 0;
-            for (int i = 1; i < Cons.CHESS_BOARD_WIDTH; i++)
+            for (int i = 1; i < boardWidth; i++)
             {
-                if (point.Y + i >= Cons.CHESS_BOARD_HEIGHT || point.X - i < 0)
+                if (point.Y + i >= boardHeight || point.X - i < 0)
                     break;
                 if (Matrix[point.Y + i][point.X - i].BackgroundImage == btn.BackgroundImage)
                     countBottom++;
@@ -464,13 +488,20 @@ namespace GameCaro
             {
                 lastMoveButton.FlatAppearance.BorderColor = CellBorderColor;
                 lastMoveButton.FlatAppearance.BorderSize = 1;
+                lastMoveButton.BackColor = CellColor;
             }
 
             lastMoveButton = button;
             if (lastMoveButton != null)
             {
-                lastMoveButton.FlatAppearance.BorderColor = RecentMoveBorderColor;
+                bool isX = ReferenceEquals(lastMoveButton.BackgroundImage, Player[0].Mark);
+                lastMoveButton.FlatAppearance.BorderColor = cyberpunkTheme
+                    ? ColorTranslator.FromHtml(isX ? "#38BDF8" : "#F87171")
+                    : RecentMoveBorderColor;
                 lastMoveButton.FlatAppearance.BorderSize = 3;
+                lastMoveButton.BackColor = cyberpunkTheme
+                    ? ColorTranslator.FromHtml(isX ? "#112838" : "#2A1822")
+                    : RecentMoveBackColor;
             }
         }
 
