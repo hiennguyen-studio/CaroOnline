@@ -28,16 +28,30 @@ namespace CaroOnline.Winforms
 
         string localPlayerName = string.Empty;
 
-        private readonly List<LocalRoomState> roomStates = new();
         private Panel? lobbyViewPanel;
-        private RoomListControl? roomCardsPanel;
         private Label? roomViewTitle;
         private LocalRoomState? selectedRoom;
-        private int selectedPreviewRoomNumber = 2;
         private bool joinedRoomAsPlayer;
-        private LobbyButton? joinSelectedRoomButton;
         private Button? quickNewGameButton;
         private Button? quickUndoButton;
+
+        // Danh sách người chơi online và các trận đang diễn ra (dữ liệu thật từ server).
+        private const int ReconnectIntervalMs = 5000;
+        private readonly List<PlayerSummary> onlinePlayers = new();
+        private readonly List<RoomSummary> ongoingMatches = new();
+        private PlayerListControl? playerListControl;
+        private MatchListControl? matchListControl;
+        private Label? onlineCountLabel;
+        private Label? matchCountLabel;
+        private Label? connectionStatusLabel;
+        private Label? matchPlayerOneLabel;
+        private Label? matchPlayerTwoLabel;
+        private MatchStatusControl? matchStatus;
+        private LobbyButton? watchMatchButton;
+        private RoomSummary? selectedMatch;
+        private System.Windows.Forms.Timer? reconnectTimer;
+        private bool isConnecting;
+        private bool loginRejected;
 
         public FormLobby()
         {
@@ -74,7 +88,7 @@ namespace CaroOnline.Winforms
 
             ClientNetworkSettings networkSettings = ClientNetworkSettings.Load();
             txbIP.Text = $"{networkSettings.ServerAddress}:{networkSettings.ServerPort}";
-            localPlayerName = Environment.UserName;
+            localPlayerName = GetLobbyPlayerName();
             txbPlayerName.ReadOnly = false;
             txbPlayerName.Text = localPlayerName;
             Lan.Text = "Rời phòng / Chọn phòng";
@@ -85,6 +99,9 @@ namespace CaroOnline.Winforms
 
             NewGame();
             ShowRoomLobbyView();
+
+            reconnectTimer = new System.Windows.Forms.Timer { Interval = ReconnectIntervalMs };
+            reconnectTimer.Tick += async (_, _) => await ConnectLobbyAsync();
         }
 
         #endregion
@@ -203,6 +220,30 @@ namespace CaroOnline.Winforms
                         NewGame();
                         break;
 
+                    case "WELCOME":
+                        resumeToken = message.ResumeToken;
+                        isOnline = true;
+                        reconnectTimer?.Stop();
+                        SetConnectionStatus($"● Đã kết nối · {message.Name}", Green);
+                        RefreshLobbyLists();
+                        break;
+
+                    case "PLAYER_LIST":
+                        onlinePlayers.Clear();
+                        onlinePlayers.AddRange(message.Players);
+                        RefreshLobbyLists();
+                        break;
+
+                    case "ROOM_LIST":
+                        ongoingMatches.Clear();
+                        ongoingMatches.AddRange(message.Rooms.Where(room => !room.IsGameOver));
+                        RefreshLobbyLists();
+                        break;
+
+                    case "ERROR":
+                        HandleServerError(message);
+                        break;
+
                     case "INFO":
                         MessageBox.Show(message.Data);
                         break;
@@ -236,13 +277,6 @@ namespace CaroOnline.Winforms
 
         private void InitializeRoomLobbyUI()
         {
-            roomStates.Clear();
-            int[] initialOccupancy = { 2, 1, 0, 0, 1, 0, 0, 1, 0, 0 };
-            for (int roomNumber = 1; roomNumber <= initialOccupancy.Length; roomNumber++)
-            {
-                roomStates.Add(new LocalRoomState(roomNumber, initialOccupancy[roomNumber - 1]));
-            }
-
             menuStrip1.Visible = false;
             pnlChessBoard.Visible = false;
             information.Visible = false;
@@ -291,6 +325,9 @@ namespace CaroOnline.Winforms
             surface.Controls.Add(subtitle);
             surface.Controls.Add(notificationText);
             surface.Controls.Add(notification);
+            connectionStatusLabel = MakeLobbyLabel("Chưa kết nối server", new Font("Segoe UI", 9F), Muted,
+                new Point(640, 56), new Size(364, 22), ContentAlignment.MiddleRight);
+            surface.Controls.Add(connectionStatusLabel);
             surface.Controls.Add(new Panel
             {
                 Location = new Point(20, 87),
@@ -308,30 +345,37 @@ namespace CaroOnline.Winforms
             surface.Controls.Add(playersCard);
             playersCard.Controls.Add(MakeLobbyLabel("Danh sách\nplayer online", new Font("Segoe UI", 11F, FontStyle.Bold), White,
                 new Point(14, 14), new Size(182, 42), ContentAlignment.MiddleLeft));
-            playersCard.Controls.Add(MakeLobbyLabel("128 trực tuyến", new Font("Segoe UI", 9F), Muted,
-                new Point(14, 58), new Size(182, 20), ContentAlignment.MiddleLeft));
-            string[] players = { "Player 1", "Player 2", "Minh Anh", "Hoàng Nam", "Player 5", "Hải Đăng", "Player 7", "Player 8" };
-            for (int i = 0; i < players.Length; i++)
+            onlineCountLabel = MakeLobbyLabel("Ngoại tuyến", new Font("Segoe UI", 9F), Muted,
+                new Point(14, 58), new Size(182, 20), ContentAlignment.MiddleLeft);
+            playersCard.Controls.Add(onlineCountLabel);
+            playerListControl = new PlayerListControl
             {
-                playersCard.Controls.Add(new PlayerEntryControl(players[i])
-                {
-                    Location = new Point(10, 87 + i * 39),
-                    Size = new Size(188, 33),
-                    BackColor = playersCard.BackColor
-                });
-            }
-            playersCard.Controls.Add(MakeLobbyLabel("+120 người khác", new Font("Segoe UI", 9F), Muted,
-                new Point(14, 451), new Size(180, 22), ContentAlignment.MiddleLeft));
+                Name = "playerListControl",
+                Location = new Point(6, 86),
+                Size = new Size(198, 418),
+                BackColor = playersCard.BackColor,
+                EmptyText = "Chưa kết nối server",
+                SelfName = localPlayerName
+            };
+            playersCard.Controls.Add(playerListControl);
+            playersCard.Controls.Add(MakeLobbyLabel("● Rảnh", new Font("Segoe UI", 8.5F), Green,
+                new Point(14, 512), new Size(70, 20), ContentAlignment.MiddleLeft));
+            playersCard.Controls.Add(MakeLobbyLabel("● Đang đấu", new Font("Segoe UI", 8.5F), Coral,
+                new Point(92, 512), new Size(100, 20), ContentAlignment.MiddleLeft));
 
             var matchCard = MakeLobbyCard(new Point(246, 110), new Size(450, 598),
                 ColorTranslator.FromHtml("#0E1622"), ColorTranslator.FromHtml("#1E2D3D"), 16);
             surface.Controls.Add(matchCard);
-            matchCard.Controls.Add(MakeLobbyLabel("Player 1", new Font("Segoe UI", 13F, FontStyle.Bold), Cyan,
-                new Point(36, 16), new Size(130, 26), ContentAlignment.MiddleRight));
+            matchPlayerOneLabel = MakeLobbyLabel("—", new Font("Segoe UI", 13F, FontStyle.Bold), Cyan,
+                new Point(36, 16), new Size(130, 26), ContentAlignment.MiddleRight);
+            matchPlayerOneLabel.AutoEllipsis = true;
+            matchCard.Controls.Add(matchPlayerOneLabel);
             matchCard.Controls.Add(MakeLobbyLabel("vs", new Font("Segoe UI", 10F, FontStyle.Bold), Muted,
                 new Point(184, 18), new Size(82, 24), ContentAlignment.MiddleCenter));
-            matchCard.Controls.Add(MakeLobbyLabel("Player 2", new Font("Segoe UI", 13F, FontStyle.Bold), Coral,
-                new Point(284, 16), new Size(130, 26), ContentAlignment.MiddleLeft));
+            matchPlayerTwoLabel = MakeLobbyLabel("—", new Font("Segoe UI", 13F, FontStyle.Bold), Coral,
+                new Point(284, 16), new Size(130, 26), ContentAlignment.MiddleLeft);
+            matchPlayerTwoLabel.AutoEllipsis = true;
+            matchCard.Controls.Add(matchPlayerTwoLabel);
             matchCard.Controls.Add(MakeLobbyLabel("BÀN CỜ · 15 × 15", new Font("Segoe UI", 8.5F, FontStyle.Bold), Muted,
                 new Point(80, 52), new Size(290, 20), ContentAlignment.MiddleCenter));
             matchCard.Controls.Add(new BoardPreviewControl
@@ -340,20 +384,19 @@ namespace CaroOnline.Winforms
                 Size = new Size(330, 330),
                 BackColor = matchCard.BackColor
             });
-            var matchStatus = new MatchStatusControl
+            matchStatus = new MatchStatusControl
             {
-                Location = new Point(90, 426),
-                Size = new Size(270, 24),
+                Location = new Point(60, 426),
+                Size = new Size(330, 24),
                 BackColor = matchCard.BackColor
             };
             matchCard.Controls.Add(matchStatus);
-            var watchMatchButton = MakeLobbyButton("VÀO XEM TRẬN ĐẤU", new Point(30, 480), new Size(390, 44),
+            watchMatchButton = MakeLobbyButton("VÀO XEM TRẬN ĐẤU", new Point(30, 480), new Size(390, 44),
                 ColorTranslator.FromHtml("#112233"), Cyan, ColorTranslator.FromHtml("#1D3B58"));
             watchMatchButton.Click += (_, _) =>
             {
-                matchStatus.Text = "Đang xem Player 1 vs Player 2";
-                matchStatus.Invalidate();
-                OpenInMatch();
+                if (selectedMatch != null)
+                    OpenInMatch(asSpectator: true);
             };
             matchCard.Controls.Add(watchMatchButton);
 
@@ -382,29 +425,25 @@ namespace CaroOnline.Winforms
             var roomsCard = MakeLobbyCard(new Point(712, 266), new Size(356, 442),
                 ColorTranslator.FromHtml("#0E1622"), ColorTranslator.FromHtml("#1E2D3D"), 16);
             surface.Controls.Add(roomsCard);
-            roomsCard.Controls.Add(MakeLobbyLabel("Phòng chờ", new Font("Segoe UI", 12F, FontStyle.Bold), White,
+            roomsCard.Controls.Add(MakeLobbyLabel("Trận đang diễn ra", new Font("Segoe UI", 12F, FontStyle.Bold), White,
                 new Point(14, 10), new Size(210, 24), ContentAlignment.MiddleLeft));
-            roomsCard.Controls.Add(MakeLobbyLabel("10 phòng", new Font("Segoe UI", 9.5F), Muted,
-                new Point(254, 11), new Size(84, 22), ContentAlignment.MiddleRight));
-            roomCardsPanel = new RoomListControl(roomStates)
+            matchCountLabel = MakeLobbyLabel("0 trận", new Font("Segoe UI", 9.5F), Muted,
+                new Point(254, 11), new Size(84, 22), ContentAlignment.MiddleRight);
+            roomsCard.Controls.Add(matchCountLabel);
+            matchListControl = new MatchListControl
             {
-                Name = "roomCardsPanel",
+                Name = "matchListControl",
                 Location = new Point(8, 42),
-                Size = new Size(340, 348),
+                Size = new Size(340, 390),
                 BackColor = roomsCard.BackColor,
-                SelectedRoomNumber = selectedPreviewRoomNumber
+                EmptyText = "Chưa kết nối server"
             };
-            roomCardsPanel.RoomSelected += roomNumber =>
+            matchListControl.MatchSelected += match =>
             {
-                selectedPreviewRoomNumber = roomNumber;
-                joinSelectedRoomButton!.Visible = true;
+                selectedMatch = match;
+                ShowSelectedMatch(match);
             };
-            roomsCard.Controls.Add(roomCardsPanel);
-            joinSelectedRoomButton = MakeLobbyButton("VÀO PHÒNG", new Point(8, 398), new Size(340, 36),
-                ColorTranslator.FromHtml("#123447"), Cyan, ColorTranslator.FromHtml("#1B4D65"));
-            joinSelectedRoomButton.Visible = false;
-            joinSelectedRoomButton.Click += (_, _) => EnterSelectedRoomUI(selectedPreviewRoomNumber);
-            roomsCard.Controls.Add(joinSelectedRoomButton);
+            roomsCard.Controls.Add(matchListControl);
 
             roomViewTitle = new Label
             {
@@ -416,14 +455,150 @@ namespace CaroOnline.Winforms
             };
             Controls.Add(roomViewTitle);
             Controls.SetChildIndex(roomViewTitle, 0);
-            RefreshRoomCards();
+            ShowSelectedMatch(null);
+            RefreshLobbyLists();
         }
 
-        private void OpenInMatch()
+        private void OpenInMatch(bool asSpectator = false)
         {
-            using var match = new FormInMatch();
+            using var match = new FormInMatch(asSpectator);
             match.ShowDialog(this);
         }
+
+        #region Danh sách online & trận đang diễn ra
+
+        /// <summary>Tên hiển thị gửi lên server; server chỉ nhận chữ, số, khoảng trắng, '_' và '-' (tối đa 24 ký tự).</summary>
+        private static string GetLobbyPlayerName()
+        {
+            string name = AuthService.CurrentDisplayName;
+            if (string.IsNullOrWhiteSpace(name))
+                name = AuthService.CurrentUsername;
+            if (string.IsNullOrWhiteSpace(name))
+                name = Environment.UserName;
+
+            string cleaned = new string(name.Trim()
+                .Select(c => char.IsLetterOrDigit(c) || c is ' ' or '_' or '-' ? c : '_')
+                .Take(24)
+                .ToArray()).Trim();
+            return cleaned.Length == 0 ? "Player" : cleaned;
+        }
+
+        private async Task ConnectLobbyAsync()
+        {
+            if (isConnecting || IsDisposed || socketManager.IsConnected)
+                return;
+
+            isConnecting = true;
+            loginRejected = false;
+            SetConnectionStatus("Đang kết nối server...", Muted);
+            try
+            {
+                ClientNetworkSettings networkSettings = ClientNetworkSettings.Load();
+                string host = string.IsNullOrWhiteSpace(AuthService.ServerHost)
+                    ? networkSettings.ServerAddress
+                    : AuthService.ServerHost;
+                localPlayerName = GetLobbyPlayerName();
+                if (playerListControl != null)
+                    playerListControl.SelfName = localPlayerName;
+
+                bool connected = await socketManager.ConnectServer(host, networkSettings.ServerPort, localPlayerName, resumeToken);
+                if (!connected)
+                {
+                    SetConnectionStatus("Không kết nối được server · thử lại sau 5 giây", Coral);
+                    reconnectTimer?.Start();
+                }
+                // Khi kết nối được, server trả WELCOME rồi tự đẩy PLAYER_LIST và ROOM_LIST.
+            }
+            finally
+            {
+                isConnecting = false;
+            }
+        }
+
+        private void HandleServerError(Message message)
+        {
+            if (message.ErrorCode == "INVALID_LOGIN")
+            {
+                // Server giữ tên trong thời gian chờ kết nối lại, nên vẫn tiếp tục thử.
+                loginRejected = true;
+                SetConnectionStatus("Tên đang được dùng hoặc không hợp lệ · thử lại sau 5 giây", Coral);
+                return;
+            }
+
+            SetConnectionStatus(string.IsNullOrWhiteSpace(message.Data) ? "Lỗi từ server" : message.Data, Coral);
+        }
+
+        private void SetConnectionStatus(string text, Color color)
+        {
+            if (connectionStatusLabel == null)
+                return;
+            connectionStatusLabel.Text = text;
+            connectionStatusLabel.ForeColor = color;
+        }
+
+        private void ClearLobbyLists()
+        {
+            onlinePlayers.Clear();
+            ongoingMatches.Clear();
+            RefreshLobbyLists();
+        }
+
+        /// <summary>Đẩy dữ liệu mới nhất vào hai danh sách và cập nhật bộ đếm.</summary>
+        private void RefreshLobbyLists()
+        {
+            string emptyText = isOnline ? string.Empty : "Chưa kết nối server";
+
+            if (playerListControl != null)
+            {
+                playerListControl.SelfName = localPlayerName;
+                playerListControl.EmptyText = isOnline ? "Chưa có người chơi nào" : emptyText;
+                playerListControl.SetItems(onlinePlayers);
+            }
+
+            if (onlineCountLabel != null)
+            {
+                int inMatch = onlinePlayers.Count(player => player.InRoom);
+                onlineCountLabel.Text = isOnline
+                    ? $"{onlinePlayers.Count} trực tuyến · {inMatch} đang đấu"
+                    : "Ngoại tuyến";
+            }
+
+            // Trận đang chọn có thể đã kết thúc: tìm lại theo RoomId để làm mới số người xem.
+            if (selectedMatch != null)
+                selectedMatch = ongoingMatches.FirstOrDefault(match => match.RoomId == selectedMatch.RoomId);
+
+            if (matchListControl != null)
+            {
+                matchListControl.SelectedRoomId = selectedMatch?.RoomId;
+                matchListControl.EmptyText = isOnline ? "Chưa có trận nào đang diễn ra" : emptyText;
+                matchListControl.SetItems(ongoingMatches);
+            }
+
+            if (matchCountLabel != null)
+                matchCountLabel.Text = $"{ongoingMatches.Count} trận";
+
+            ShowSelectedMatch(selectedMatch);
+        }
+
+        private void ShowSelectedMatch(RoomSummary? match)
+        {
+            selectedMatch = match;
+            if (matchPlayerOneLabel != null)
+                matchPlayerOneLabel.Text = match?.PlayerOne ?? "—";
+            if (matchPlayerTwoLabel != null)
+                matchPlayerTwoLabel.Text = match?.PlayerTwo ?? "—";
+            if (matchStatus != null)
+            {
+                matchStatus.Text = match == null
+                    ? "Chọn một trận ở danh sách bên phải"
+                    : $"Đang đấu · {match.SpectatorCount} người xem";
+                matchStatus.Invalidate();
+            }
+            if (watchMatchButton != null)
+                watchMatchButton.Enabled = match != null;
+        }
+
+        #endregion
 
         private static readonly Color White = ColorTranslator.FromHtml("#F8FAFC");
         private static readonly Color Muted = ColorTranslator.FromHtml("#94A3B8");
@@ -434,16 +609,16 @@ namespace CaroOnline.Winforms
 
         private static Label MakeLobbyLabel(string text, Font font, Color color, Point location, Size size,
             ContentAlignment alignment) => new()
-        {
-            AutoSize = false,
-            BackColor = Color.Transparent,
-            Text = text,
-            Font = font,
-            ForeColor = color,
-            Location = location,
-            Size = size,
-            TextAlign = alignment
-        };
+            {
+                AutoSize = false,
+                BackColor = Color.Transparent,
+                Text = text,
+                Font = font,
+                ForeColor = color,
+                Location = location,
+                Size = size,
+                TextAlign = alignment
+            };
 
         private static RoundedPanel MakeLobbyCard(Point location, Size size, Color background, Color border, int radius) => new()
         {
@@ -457,16 +632,16 @@ namespace CaroOnline.Winforms
 
         private static LobbyButton MakeLobbyButton(string text, Point location, Size size, Color background,
             Color foreground, Color border) => new()
-        {
-            Text = text,
-            Location = location,
-            Size = size,
-            BackColor = background,
-            ForeColor = foreground,
-            BorderColor = border,
-            Font = new Font("Segoe UI", 10F, FontStyle.Bold),
-            Cursor = Cursors.Hand
-        };
+            {
+                Text = text,
+                Location = location,
+                Size = size,
+                BackColor = background,
+                ForeColor = foreground,
+                BorderColor = border,
+                Font = new Font("Segoe UI", 10F, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
 
         private static void StyleSidebarButton(Button button, Color backColor, Color foreColor)
         {
@@ -568,25 +743,6 @@ namespace CaroOnline.Winforms
             });
         }
 
-        private void RefreshRoomCards()
-        {
-            if (roomCardsPanel == null)
-                return;
-
-            roomCardsPanel.SelectedRoomNumber = selectedPreviewRoomNumber;
-            roomCardsPanel.Invalidate();
-        }
-
-        private string GetRoomStatusText(LocalRoomState room)
-        {
-            return room.Occupancy switch
-            {
-                0 => "Trống",
-                1 => "Đang chờ 1/2",
-                _ => "Đang đấu 2/2"
-            };
-        }
-
         private void ShowRoomLobbyView()
         {
             if (lobbyViewPanel == null)
@@ -603,24 +759,6 @@ namespace CaroOnline.Winforms
             Text = "CaroOnline - Sảnh chọn phòng";
         }
 
-        private void EnterSelectedRoomUI(int roomNumber)
-        {
-            LocalRoomState? room = roomStates.Find(item => item.Number == roomNumber);
-            if (room == null)
-                return;
-
-            bool enterAsSpectator = room.Occupancy >= 2;
-            if (!enterAsSpectator)
-                room.Occupancy++;
-            RefreshRoomCards();
-            using (var match = new FormInMatch(enterAsSpectator))
-                match.ShowDialog(this);
-
-            if (!enterAsSpectator && room.Occupancy > 0)
-                room.Occupancy--;
-            RefreshRoomCards();
-        }
-
         private void LeaveRoomToLobbyUI()
         {
             if (selectedRoom != null && joinedRoomAsPlayer && selectedRoom.Occupancy > 0)
@@ -632,7 +770,6 @@ namespace CaroOnline.Winforms
             tmCoolDown.Stop();
             prcbCoolDown.Value = 0;
             UpdateUndoAvailability();
-            RefreshRoomCards();
             ShowRoomLobbyView();
         }
 
@@ -696,7 +833,14 @@ namespace CaroOnline.Winforms
         {
             if (IsDisposed || !IsHandleCreated)
                 return;
-            BeginInvoke(new Action(() => isOnline = false));
+            BeginInvoke(new Action(() =>
+            {
+                isOnline = false;
+                ClearLobbyLists();
+                if (!loginRejected)
+                    SetConnectionStatus("Mất kết nối server · đang thử lại...", Coral);
+                reconnectTimer?.Start();
+            }));
         }
 
         private async void ChessBoard_OnlineMoveRequested(Point point, int playerIndex)
@@ -947,11 +1091,9 @@ namespace CaroOnline.Winforms
 
         private sealed class BoardPreviewControl : Control
         {
+            // Server chỉ gửi tóm tắt trận (không kèm bàn cờ) nên bản xem trước để trống.
             private static readonly (int Row, int Column, string Mark)[] Moves =
-            {
-                (6, 7, "X"), (6, 8, "O"), (7, 8, "X"), (7, 9, "O"),
-                (8, 7, "X"), (8, 9, "O"), (9, 6, "X"), (9, 10, "O")
-            };
+                Array.Empty<(int Row, int Column, string Mark)>();
 
             public BoardPreviewControl()
             {
@@ -1001,11 +1143,10 @@ namespace CaroOnline.Winforms
             }
         }
 
-        private sealed class RoomListControl : Control
+        /// <summary>Danh sách tự vẽ, có cuộn bằng con lăn / thanh trượt, dùng chung cho người chơi và trận đấu.</summary>
+        private abstract class LobbyListControl<T> : Control
         {
-            private const int RowHeight = 34;
-            private const int RowSpacing = 5;
-            private readonly List<LocalRoomState> _rooms;
+            private readonly List<T> _items = new();
             private int _scrollOffset;
             private int _hoveredIndex = -1;
             private bool _draggingThumb;
@@ -1013,15 +1154,31 @@ namespace CaroOnline.Winforms
             private int _dragStartOffset;
             private Rectangle _thumbBounds;
 
-            public int SelectedRoomNumber;
-            public event Action<int>? RoomSelected;
+            public string EmptyText = "";
 
-            public RoomListControl(List<LocalRoomState> rooms)
+            protected abstract int RowHeight { get; }
+            protected virtual int RowSpacing => 5;
+
+            protected LobbyListControl()
             {
                 DoubleBuffered = true;
-                _rooms = rooms;
                 SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            }
+
+            public void SetItems(IEnumerable<T> items)
+            {
+                _items.Clear();
+                _items.AddRange(items);
+                _hoveredIndex = -1;
+                _scrollOffset = Math.Clamp(_scrollOffset, 0, GetMaxScroll());
+                Invalidate();
+            }
+
+            protected abstract void PaintRow(Graphics g, T item, Rectangle bounds, bool hovered);
+
+            protected virtual void OnRowClicked(T item)
+            {
             }
 
             protected override void OnPaintBackground(PaintEventArgs e) => e.Graphics.Clear(BackColor);
@@ -1029,42 +1186,25 @@ namespace CaroOnline.Winforms
             protected override void OnPaint(PaintEventArgs e)
             {
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                int pitch = RowHeight + RowSpacing;
                 int rowWidth = Width - 21;
-                using var roomFont = new Font("Segoe UI", 9F, FontStyle.Bold);
-                using var countFont = new Font("Segoe UI", 9F);
-                using var statusFont = new Font("Segoe UI", 8.5F);
-                for (int i = 0; i < _rooms.Count; i++)
+                for (int i = 0; i < _items.Count; i++)
                 {
-                    int y = 5 + i * (RowHeight + RowSpacing) - _scrollOffset;
-                    var rect = new RectangleF(4, y, rowWidth, RowHeight);
-                    if (rect.Bottom < 0 || rect.Top > Height) continue;
+                    int y = 5 + i * pitch - _scrollOffset;
+                    if (y + RowHeight < 0 || y > Height) continue;
+                    PaintRow(e.Graphics, _items[i], new Rectangle(4, y, rowWidth, RowHeight), i == _hoveredIndex);
+                }
 
-                    bool selected = _rooms[i].Number == SelectedRoomNumber;
-                    bool hovered = i == _hoveredIndex;
-                    Color fill = selected ? ColorTranslator.FromHtml("#13283C")
-                        : hovered ? ColorTranslator.FromHtml("#17283A")
-                        : ColorTranslator.FromHtml("#131D2B");
-                    Color border = selected ? Cyan : ColorTranslator.FromHtml("#1E2F45");
-                    using GraphicsPath path = CreateRoundedPath(rect, 8F);
-                    using var brush = new SolidBrush(fill);
-                    using var pen = new Pen(border, selected ? 1.2F : 1F);
-                    e.Graphics.FillPath(brush, path);
-                    e.Graphics.DrawPath(pen, path);
+                if (_items.Count == 0 && EmptyText.Length > 0)
+                {
+                    TextRenderer.DrawText(e.Graphics, EmptyText, Font, new Rectangle(8, 0, Width - 16, Height), Subtle,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak);
+                }
 
-                    LocalRoomState room = _rooms[i];
-                    Color statusColor = room.Occupancy == 2 ? Coral : room.Occupancy == 1 ? Cyan : Subtle;
-                    string status = room.Occupancy == 2 ? "Đang đấu" : room.Occupancy == 1 ? "Đang chờ" : "Trống";
-                    TextRenderer.DrawText(e.Graphics, $"Phòng {room.Number}", roomFont,
-                        new Rectangle(14, y, 91, RowHeight), White,
-                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
-                    TextRenderer.DrawText(e.Graphics, $"{room.Occupancy}/2", countFont,
-                        new Rectangle(102, y, 42, RowHeight), Muted,
-                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
-                    TextRenderer.DrawText(e.Graphics, status, statusFont,
-                        new Rectangle(151, y, 81, RowHeight), statusColor,
-                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
-                    using var dotBrush = new SolidBrush(statusColor);
-                    e.Graphics.FillEllipse(dotBrush, rowWidth - 16, y + (RowHeight - 5) / 2, 5, 5);
+                if (GetMaxScroll() <= 0)
+                {
+                    _thumbBounds = Rectangle.Empty;
+                    return;
                 }
 
                 int trackY = 5;
@@ -1072,10 +1212,10 @@ namespace CaroOnline.Winforms
                 using var trackBrush = new SolidBrush(ColorTranslator.FromHtml("#1B2A3D"));
                 using GraphicsPath trackPath = CreateRoundedPath(new RectangleF(Width - 8, trackY, 3, trackHeight), 2F);
                 e.Graphics.FillPath(trackBrush, trackPath);
-                int contentHeight = _rooms.Count * (RowHeight + RowSpacing) - RowSpacing + 10;
+                int contentHeight = GetContentHeight();
+                int maxScroll = GetMaxScroll();
                 int thumbHeight = Math.Max(30, (int)((long)trackHeight * trackHeight / Math.Max(trackHeight, contentHeight)));
-                int maxScroll = Math.Max(0, contentHeight - Height);
-                int thumbY = trackY + (maxScroll == 0 ? 0 : (trackHeight - thumbHeight) * _scrollOffset / maxScroll);
+                int thumbY = trackY + (trackHeight - thumbHeight) * _scrollOffset / maxScroll;
                 _thumbBounds = new Rectangle(Width - 9, thumbY, 5, thumbHeight);
                 using var thumbBrush = new SolidBrush(Cyan);
                 using GraphicsPath thumbPath = CreateRoundedPath(_thumbBounds, 3F);
@@ -1088,16 +1228,14 @@ namespace CaroOnline.Winforms
                 if (_draggingThumb)
                 {
                     int trackHeight = Math.Max(1, Height - 10 - _thumbBounds.Height);
-                    int maxScroll = GetMaxScroll();
-                    int offset = _dragStartOffset + (e.Y - _dragStartY) * maxScroll / trackHeight;
-                    SetScrollOffset(offset);
+                    SetScrollOffset(_dragStartOffset + (e.Y - _dragStartY) * GetMaxScroll() / trackHeight);
                     return;
                 }
 
-                int index = (e.Y + _scrollOffset - 5) / (RowHeight + RowSpacing);
+                int index = IndexAt(e.Y);
                 if (index != _hoveredIndex)
                 {
-                    _hoveredIndex = index >= 0 && index < _rooms.Count ? index : -1;
+                    _hoveredIndex = index;
                     Invalidate();
                 }
             }
@@ -1113,7 +1251,7 @@ namespace CaroOnline.Winforms
             {
                 base.OnMouseDown(e);
                 if (e.Button != MouseButtons.Left) return;
-                if (e.X >= Width - 12)
+                if (GetMaxScroll() > 0 && e.X >= Width - 12)
                 {
                     _draggingThumb = true;
                     _dragStartY = e.Y;
@@ -1121,11 +1259,10 @@ namespace CaroOnline.Winforms
                     return;
                 }
 
-                int index = (e.Y + _scrollOffset - 5) / (RowHeight + RowSpacing);
-                if (index >= 0 && index < _rooms.Count)
+                int index = IndexAt(e.Y);
+                if (index >= 0)
                 {
-                    SelectedRoomNumber = _rooms[index].Number;
-                    RoomSelected?.Invoke(SelectedRoomNumber);
+                    OnRowClicked(_items[index]);
                     Invalidate();
                 }
             }
@@ -1142,16 +1279,94 @@ namespace CaroOnline.Winforms
                 SetScrollOffset(_scrollOffset - Math.Sign(e.Delta) * (RowHeight + RowSpacing));
             }
 
-            private int GetMaxScroll()
+            private int IndexAt(int y)
             {
-                int contentHeight = _rooms.Count * (RowHeight + RowSpacing) - RowSpacing + 10;
-                return Math.Max(0, contentHeight - Height);
+                int pitch = RowHeight + RowSpacing;
+                int offset = y + _scrollOffset - 5;
+                if (offset < 0 || offset % pitch >= RowHeight) return -1;
+                int index = offset / pitch;
+                return index < _items.Count ? index : -1;
             }
+
+            private int GetContentHeight() =>
+                _items.Count == 0 ? 0 : _items.Count * (RowHeight + RowSpacing) - RowSpacing + 10;
+
+            private int GetMaxScroll() => Math.Max(0, GetContentHeight() - Height);
 
             private void SetScrollOffset(int value)
             {
                 _scrollOffset = Math.Clamp(value, 0, GetMaxScroll());
                 Invalidate();
+            }
+        }
+
+        private sealed class PlayerListControl : LobbyListControl<PlayerSummary>
+        {
+            public string SelfName = "";
+
+            protected override int RowHeight => 33;
+            protected override int RowSpacing => 6;
+
+            protected override void PaintRow(Graphics g, PlayerSummary player, Rectangle bounds, bool hovered)
+            {
+                if (hovered)
+                {
+                    using GraphicsPath hoverPath = CreateRoundedPath(bounds, 7F);
+                    using var hoverBrush = new SolidBrush(ColorTranslator.FromHtml("#172638"));
+                    g.FillPath(hoverBrush, hoverPath);
+                }
+
+                bool isSelf = string.Equals(player.Name, SelfName, StringComparison.OrdinalIgnoreCase);
+                using var dotBrush = new SolidBrush(player.InRoom ? Coral : Green);
+                g.FillEllipse(dotBrush, bounds.X + 9, bounds.Y + (bounds.Height - 8) / 2, 8, 8);
+
+                using var nameFont = new Font("Segoe UI", 9.5F, isSelf ? FontStyle.Bold : FontStyle.Regular);
+                string text = isSelf ? $"{player.Name} (bạn)" : player.Name;
+                TextRenderer.DrawText(g, text, nameFont,
+                    new Rectangle(bounds.X + 27, bounds.Y, bounds.Width - 31, bounds.Height),
+                    isSelf ? Cyan : ColorTranslator.FromHtml("#E2E8F0"),
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
+                    TextFormatFlags.EndEllipsis);
+            }
+        }
+
+        private sealed class MatchListControl : LobbyListControl<RoomSummary>
+        {
+            public string? SelectedRoomId;
+            public event Action<RoomSummary>? MatchSelected;
+
+            protected override int RowHeight => 46;
+
+            protected override void PaintRow(Graphics g, RoomSummary match, Rectangle bounds, bool hovered)
+            {
+                bool selected = match.RoomId == SelectedRoomId;
+                Color fill = selected ? ColorTranslator.FromHtml("#13283C")
+                    : hovered ? ColorTranslator.FromHtml("#17283A")
+                    : ColorTranslator.FromHtml("#131D2B");
+                Color border = selected ? Cyan : ColorTranslator.FromHtml("#1E2F45");
+                using GraphicsPath path = CreateRoundedPath(bounds, 8F);
+                using var brush = new SolidBrush(fill);
+                using var pen = new Pen(border, selected ? 1.2F : 1F);
+                g.FillPath(brush, path);
+                g.DrawPath(pen, path);
+
+                using var dotBrush = new SolidBrush(Coral);
+                g.FillEllipse(dotBrush, bounds.Right - 16, bounds.Y + 12, 6, 6);
+
+                const TextFormatFlags flags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
+                    TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis;
+                using var titleFont = new Font("Segoe UI", 9.5F, FontStyle.Bold);
+                using var detailFont = new Font("Segoe UI", 8.5F);
+                TextRenderer.DrawText(g, $"{match.PlayerOne}  vs  {match.PlayerTwo}", titleFont,
+                    new Rectangle(bounds.X + 12, bounds.Y + 4, bounds.Width - 34, 22), White, flags);
+                TextRenderer.DrawText(g, $"Phòng {match.RoomId} · {match.SpectatorCount} người xem", detailFont,
+                    new Rectangle(bounds.X + 12, bounds.Y + 24, bounds.Width - 24, 18), Muted, flags);
+            }
+
+            protected override void OnRowClicked(RoomSummary match)
+            {
+                SelectedRoomId = match.RoomId;
+                MatchSelected?.Invoke(match);
             }
         }
 
@@ -1256,15 +1471,16 @@ namespace CaroOnline.Winforms
             }
             else
             {
+                reconnectTimer?.Stop();
                 socketManager.Close();
             }
         }
 
         #endregion
 
-        private void Form1_Load(object sender, EventArgs e)
+        private async void Form1_Load(object sender, EventArgs e)
         {
-
+            await ConnectLobbyAsync();
         }
     }
 }
