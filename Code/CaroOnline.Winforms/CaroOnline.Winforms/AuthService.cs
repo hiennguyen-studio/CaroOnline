@@ -10,6 +10,8 @@ namespace CaroOnline.Winforms
         public static string CurrentUsername { get; private set; } = "";
         public static string CurrentRole { get; private set; } = "";
         public static string CurrentDisplayName { get; private set; } = "";
+        /// <summary>Địa chỉ máy chủ đã dùng để đăng nhập; sảnh dùng lại để kết nối server game.</summary>
+        public static string ServerHost { get; private set; } = "";
 
         private static string B64(string s) => Convert.ToBase64String(Encoding.UTF8.GetBytes(s));
         private static string UnB64(string s) => Encoding.UTF8.GetString(Convert.FromBase64String(s));
@@ -45,6 +47,7 @@ namespace CaroOnline.Winforms
                 if (r[0] == "OK" && r.Length >= 3)
                 {
                     CurrentUsername = username;
+                    ServerHost = ParseHost(endpoint);
                     CurrentRole = UnB64(r[1]);
                     CurrentDisplayName = UnB64(r[2]);
                     return (true, "");
