@@ -1,7 +1,8 @@
 ﻿
 using System;
-using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -13,42 +14,67 @@ namespace CaroOnline.Server
 {
     public class ServerSocketManager
     {
-        private TcpListener? listener;
+        private TcpListener listener;
 
-        private readonly ConcurrentDictionary<int, TcpClient> clients
-            = new ConcurrentDictionary<int, TcpClient>();
+        // Lưu danh sách Client
+        private readonly Dictionary<int, ClientSession> clients
+            = new Dictionary<int, ClientSession>();
 
-        private readonly ConcurrentDictionary<int, SemaphoreSlim> sendLocks
-            = new ConcurrentDictionary<int, SemaphoreSlim>();
+        private readonly object clientLock = new object();
 
+        // Quản lý game
         private readonly GameManager game = new GameManager();
 
-        private readonly SemaphoreSlim gameLock = new SemaphoreSlim(1, 1);
+        private readonly SemaphoreSlim gameLock =
+            new SemaphoreSlim(1, 1);
 
-        private CancellationTokenSource? cancellation;
+        private CancellationTokenSource cancellation;
 
-        public event Action<string>? LogReceived;
+        // Các sự kiện gửi thông tin về FormServer
+        public event Action<string> LogReceived;
 
-        public event Action<int>? ClientCountChanged;
+        public event Action<int> ClientCountChanged;
+
+        public event Action<string[]> ClientListChanged;
 
         public bool IsRunning { get; private set; }
+
+        // Mỗi Client có một khóa gửi dữ liệu riêng
+        private class ClientSession
+        {
+            public TcpClient Client { get; }
+
+            public SemaphoreSlim SendLock { get; }
+                = new SemaphoreSlim(1, 1);
+
+            public ClientSession(TcpClient client)
+            {
+                Client = client;
+            }
+        }
+
+        // ==========================================
+        // START SERVER
+        // ==========================================
 
         public async Task StartServer()
         {
             if (IsRunning)
                 return;
 
+            cancellation = new CancellationTokenSource();
+
             try
             {
-                cancellation = new CancellationTokenSource();
-
-                listener = new TcpListener(IPAddress.Any, 9999);
+                listener = new TcpListener(
+                    IPAddress.Any, 9999);
 
                 listener.Start();
 
                 IsRunning = true;
 
                 Log("Server đang chạy tại cổng 9999.");
+                Log("Đang chờ Client kết nối...");
 
                 while (!cancellation.IsCancellationRequested)
                 {
@@ -56,16 +82,50 @@ namespace CaroOnline.Server
                         await listener.AcceptTcpClientAsync(
                             cancellation.Token);
 
-                    _ = HandleClient(client);
+                    int playerIndex = -1;
+
+                    lock (clientLock)
+                    {
+                        if (clients.Count < 2)
+                        {
+                            playerIndex = clients.ContainsKey(0)
+                                ? 1 : 0;
+
+                            clients.Add(
+                                playerIndex,
+                                new ClientSession(client));
+                        }
+                    }
+
+                    // Server chỉ cho phép 2 Client
+                    if (playerIndex == -1)
+                    {
+                        Log("Server đã đủ 2 người chơi.");
+
+                        client.Close();
+
+                        continue;
+                    }
+
+                    string ip =
+                        client.Client.RemoteEndPoint?.ToString()
+                        ?? "Unknown";
+
+                    Log($"Player {playerIndex + 1} đã kết nối: {ip}");
+
+                    UpdateClientList();
+
+                    // Xử lý Client riêng biệt
+                    _ = HandleClient(client, playerIndex);
                 }
             }
             catch (OperationCanceledException)
             {
-                Log("Server đã dừng nhận kết nối.");
+                // Server được yêu cầu dừng
             }
             catch (ObjectDisposedException)
             {
-                // Listener đã được đóng.
+                // Listener đã đóng
             }
             catch (SocketException ex)
             {
@@ -82,56 +142,44 @@ namespace CaroOnline.Server
             }
         }
 
-        private async Task HandleClient(TcpClient client)
-        {
-            int playerIndex = -1;
+        // ==========================================
+        // HANDLE CLIENT
+        // ==========================================
 
+        private async Task HandleClient(
+            TcpClient client,
+            int playerIndex)
+        {
             try
             {
-                playerIndex = GetFreePlayer();
-
-                if (playerIndex == -1)
-                {
-                    Log("Server đã đủ 2 người chơi.");
-                    client.Close();
-                    return;
-                }
-
-                clients[playerIndex] = client;
-
-                sendLocks[playerIndex] = new SemaphoreSlim(1, 1);
-
-                Log($"Player {playerIndex + 1} đã kết nối.");
-
-                ClientCountChanged?.Invoke(clients.Count);
-
                 using NetworkStream stream = client.GetStream();
 
                 using StreamReader reader =
                     new StreamReader(stream, Encoding.UTF8);
 
-                await SendToClient(
-                    playerIndex,
-                    new Message
-                    {
-                        Type = "WELCOME",
-                        PlayerIndex = playerIndex
-                    });
+                // Gửi thông tin Player cho Client
+                await SendToClient(client, new Message
+                {
+                    Type = "WELCOME",
+                    PlayerIndex = playerIndex
+                });
 
+                // Thông báo số lượng Client
                 await Broadcast(new Message
                 {
                     Type = "PLAYER_COUNT",
-                    Data = clients.Count.ToString()
+                    Data = GetClientCount().ToString()
                 });
 
-                while (IsRunning && client.Connected)
+                // Nhận dữ liệu từ Client
+                while (IsRunning)
                 {
-                    string? line = await reader.ReadLineAsync();
+                    string line = await reader.ReadLineAsync();
 
                     if (line == null)
                         break;
 
-                    Message? message =
+                    Message message =
                         JsonSerializer.Deserialize<Message>(line);
 
                     if (message == null)
@@ -140,52 +188,93 @@ namespace CaroOnline.Server
                     await ProcessMessage(playerIndex, message);
                 }
             }
-            catch (IOException ex)
+            catch (IOException)
             {
-                Log("Lỗi truyền dữ liệu: " + ex.Message);
+                // Client mất kết nối
             }
-            catch (JsonException ex)
+            catch (ObjectDisposedException)
             {
-                Log("Dữ liệu JSON không hợp lệ: " + ex.Message);
+                // Kết nối đã đóng
             }
             catch (Exception ex)
             {
-                Log("Lỗi Client: " + ex.Message);
+                Log($"Player {playerIndex + 1}: {ex.Message}");
             }
             finally
             {
-                if (playerIndex != -1)
+                bool removed = false;
+
+                lock (clientLock)
                 {
-                    if (clients.TryRemove(playerIndex, out _))
+                    if (clients.TryGetValue(
+                        playerIndex, out ClientSession current)
+                        && current.Client == client)
                     {
-                        sendLocks.TryRemove(playerIndex, out _);
-
-                        Log($"Player {playerIndex + 1} đã ngắt kết nối.");
-
-                        ClientCountChanged?.Invoke(clients.Count);
-
-                        await Broadcast(new Message
-                        {
-                            Type = "PLAYER_COUNT",
-                            Data = clients.Count.ToString()
-                        });
+                        clients.Remove(playerIndex);
+                        removed = true;
                     }
                 }
 
                 client.Close();
+
+                if (removed)
+                {
+                    Log($"Player {playerIndex + 1} đã ngắt kết nối.");
+
+                    UpdateClientList();
+
+                    await Broadcast(new Message
+                    {
+                        Type = "PLAYER_COUNT",
+                        Data = GetClientCount().ToString()
+                    });
+                }
             }
         }
 
-        private int GetFreePlayer()
+        // ==========================================
+        // GET CLIENT COUNT
+        // ==========================================
+
+        private int GetClientCount()
         {
-            if (!clients.ContainsKey(0))
-                return 0;
-
-            if (!clients.ContainsKey(1))
-                return 1;
-
-            return -1;
+            lock (clientLock)
+            {
+                return clients.Count;
+            }
         }
+
+        // ==========================================
+        // UPDATE CLIENT LIST
+        // ==========================================
+
+        private void UpdateClientList()
+        {
+            string[] clientNames;
+
+            lock (clientLock)
+            {
+                clientNames = clients
+                    .OrderBy(x => x.Key)
+                    .Select(x =>
+                    {
+                        string ip =
+                            x.Value.Client.Client.RemoteEndPoint?.ToString()
+                            ?? "Unknown";
+
+                        return $"Player {x.Key + 1} | {ip}";
+                    })
+                    .ToArray();
+            }
+
+            ClientCountChanged?.Invoke(clientNames.Length);
+
+            ClientListChanged?.Invoke(clientNames);
+        }
+
+        // ==========================================
+        // PROCESS MESSAGE
+        // ==========================================
 
         private async Task ProcessMessage(
             int playerIndex,
@@ -197,20 +286,19 @@ namespace CaroOnline.Server
             {
                 switch (message.Type)
                 {
+                    // Người chơi đánh cờ
                     case "MOVE":
 
-                        if (clients.Count != 2)
+                        if (GetClientCount() < 2)
                             return;
 
                         if (!game.MakeMove(
                             message.X,
                             message.Y,
                             playerIndex))
-                        {
-                            Log("Nước đi không hợp lệ.");
                             return;
-                        }
 
+                        // Đồng bộ nước đi cho cả 2 Client
                         await Broadcast(new Message
                         {
                             Type = "MOVE",
@@ -232,16 +320,6 @@ namespace CaroOnline.Server
                                 PlayerIndex = playerIndex,
                                 Data = "WIN"
                             });
-
-                            Log($"Player {playerIndex + 1} đã chiến thắng.");
-                        }
-                        else if (game.IsBoardFull())
-                        {
-                            await Broadcast(new Message
-                            {
-                                Type = "GAME_OVER",
-                                Data = "DRAW"
-                            });
                         }
                         else
                         {
@@ -254,6 +332,7 @@ namespace CaroOnline.Server
 
                         break;
 
+                    // Hoàn tác nước đi
                     case "UNDO":
 
                         if (game.Undo())
@@ -263,13 +342,15 @@ namespace CaroOnline.Server
                                 Type = "UNDO",
                                 PlayerIndex = game.CurrentPlayer
                             });
-
-                            Log("Đã thực hiện Undo.");
                         }
 
                         break;
 
+                    // Chơi ván mới
                     case "NEW_GAME":
+
+                        if (GetClientCount() < 2)
+                            return;
 
                         game.NewGame();
 
@@ -278,8 +359,6 @@ namespace CaroOnline.Server
                             Type = "NEW_GAME",
                             PlayerIndex = 0
                         });
-
-                        Log("Đã bắt đầu ván mới.");
 
                         break;
                 }
@@ -290,57 +369,97 @@ namespace CaroOnline.Server
             }
         }
 
+        // ==========================================
+        // BROADCAST
+        // ==========================================
+
         private async Task Broadcast(Message message)
         {
             string json = JsonSerializer.Serialize(message);
 
-            foreach (var item in clients)
+            byte[] data = Encoding.UTF8.GetBytes(
+                json + "\n");
+
+            List<ClientSession> clientSnapshot;
+
+            lock (clientLock)
+            {
+                clientSnapshot = clients.Values.ToList();
+            }
+
+            foreach (ClientSession session in clientSnapshot)
             {
                 try
                 {
-                    await SendToClient(item.Key, message);
+                    await session.SendLock.WaitAsync();
+
+                    try
+                    {
+                        if (!session.Client.Connected)
+                            continue;
+
+                        NetworkStream stream =
+                            session.Client.GetStream();
+
+                        await stream.WriteAsync(data);
+                    }
+                    finally
+                    {
+                        session.SendLock.Release();
+                    }
                 }
-                catch (Exception ex)
+                catch
                 {
-                    Log("Không thể gửi dữ liệu đến Player "
-                        + (item.Key + 1) + ": " + ex.Message);
+                    Log("Không thể gửi dữ liệu đến Client.");
                 }
             }
         }
 
+        // ==========================================
+        // SEND TO CLIENT
+        // ==========================================
+
         private async Task SendToClient(
-            int playerIndex,
+            TcpClient client,
             Message message)
         {
-            if (!clients.TryGetValue(playerIndex, out TcpClient? client))
+            string json = JsonSerializer.Serialize(message);
+
+            byte[] data = Encoding.UTF8.GetBytes(
+                json + "\n");
+
+            ClientSession session = null;
+
+            lock (clientLock)
+            {
+                session = clients.Values.FirstOrDefault(
+                    x => x.Client == client);
+            }
+
+            if (session == null)
                 return;
 
-            if (!sendLocks.TryGetValue(playerIndex, out SemaphoreSlim? sendLock))
-                return;
-
-            await sendLock.WaitAsync();
+            await session.SendLock.WaitAsync();
 
             try
             {
-                if (!client.Connected)
-                    return;
-
-                string json = JsonSerializer.Serialize(message);
-
-                byte[] data = Encoding.UTF8.GetBytes(json + "\n");
-
                 await client.GetStream().WriteAsync(data);
             }
             finally
             {
-                sendLock.Release();
+                session.SendLock.Release();
             }
         }
 
+        // ==========================================
+        // STOP SERVER
+        // ==========================================
+
         public void StopServer()
         {
-            if (!IsRunning)
-                return;
+            // Không để Server tự bỏ qua việc đóng
+            // chỉ vì IsRunning đã thay đổi trạng thái.
+            bool wasRunning = IsRunning;
 
             IsRunning = false;
 
@@ -348,17 +467,27 @@ namespace CaroOnline.Server
 
             listener?.Stop();
 
-            foreach (var item in clients)
+            lock (clientLock)
             {
-                item.Value.Close();
+                foreach (var session in clients.Values)
+                {
+                    session.Client.Close();
+                }
+
+                clients.Clear();
             }
 
-            clients.Clear();
+            UpdateClientList();
 
-            ClientCountChanged?.Invoke(0);
+            if (wasRunning)
+                Log("Server đã dừng.");
 
-            Log("Server đã dừng.");
+            listener = null;
         }
+
+        // ==========================================
+        // LOG
+        // ==========================================
 
         private void Log(string message)
         {
