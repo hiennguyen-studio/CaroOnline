@@ -1,157 +1,296 @@
-
 using System;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace CaroOnline.Server
 {
     public partial class FormServer : Form
     {
-        private ServerSocketManager server;
-        private Database database;
-        private bool isDatabaseConnected = false;
-        private AuthServer? authServer;
+        private readonly ServerSocketManager server;
+        private readonly AuthServer authServer;
+        private readonly Database database;
 
         public FormServer()
         {
             InitializeComponent();
 
+            // Khởi tạo Database
+            database = new Database();
+
+            // Khởi tạo Auth Server
+            authServer = new AuthServer(database);
+
+            // Khởi tạo Game Server (đa phòng)
             server = new ServerSocketManager();
 
+            // Nhận log từ Auth Server
+            authServer.Log += message =>
+            {
+                Server_LogReceived("[AUTH] " + message);
+            };
+
+            // Nhận log từ Game Server
             server.LogReceived += Server_LogReceived;
 
+            // Nhận số lượng kết nối
             server.ClientCountChanged += Server_ClientCountChanged;
 
-            lblStatus.Text = "Server đang dừng";
+            // Nhận danh sách Client (kèm phòng đang ở)
+            server.ClientListChanged += Server_ClientListChanged;
+
+            // Nhận số lượng phòng đang chạy
+            server.RoomCountChanged += Server_RoomCountChanged;
+
+            ResetServerLabels();
 
             listBox1.Items.Clear();
 
             button2.Enabled = false;
-            CheckDatabaseConnection();
         }
-        private void CheckDatabaseConnection()
+
+        // =================================
+        // GIAO DIỆN
+        // =================================
+
+        private void ResetServerLabels()
         {
-            database = new Database();
+            lblStatus.Text = "Server đang dừng";
+            UpdateInfoLabel(0);
+            label2.Text = $"Danh sách Client (0/{server.MaxConnections})";
+        }
 
-            if (database.TestConnection(out string error))
+        private void UpdateInfoLabel(int roomCount)
+        {
+            label1.Text =
+                $"Auth: {AuthServer.Port} | Game: {server.Port} | " +
+                $"Phòng: {roomCount}/{server.MaxRooms}";
+        }
+
+        // Chạy một hành động trên luồng giao diện, bỏ qua nếu Form đang đóng
+        private void RunOnUi(Action action)
+        {
+            if (IsDisposed || !IsHandleCreated)
+                return;
+
+            try
             {
-                isDatabaseConnected = true;
+                BeginInvoke(new Action(() =>
+                {
+                    if (IsDisposed)
+                        return;
 
-                lblStatus.Text = "Database đã kết nối";
+                    action();
+                }));
+            }
+            catch (InvalidOperationException)
+            {
+                // Form đang đóng hoặc đã đóng.
+                // (ObjectDisposedException kế thừa InvalidOperationException
+                // nên đã được bắt ở đây.)
+            }
+        }
 
-                richTextBox1.AppendText(
-                    "Database kết nối thành công!" +
-                    Environment.NewLine
+        // =================================
+        // START SERVER
+        // =================================
+
+        private async void button1_Click(object sender, EventArgs e)
+        {
+            if (server.IsRunning)
+                return;
+
+            button1.Enabled = false;
+
+            try
+            {
+                // Kiểm tra kết nối SQL Server
+                var result = await Task.Run(() =>
+                {
+                    bool ok = database.TestConnection(out string error);
+                    return (ok, error);
+                });
+
+                if (!result.ok)
+                {
+                    MessageBox.Show(
+                        "Không kết nối được SQL Server:\n" +
+                        result.error,
+                        "Lỗi Database",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error
+                    );
+
+                    button1.Enabled = true;
+                    return;
+                }
+
+                Server_LogReceived("Kết nối SQL Server thành công.");
+
+                // Khởi động Auth Server
+                authServer.Start();
+
+                Server_LogReceived(
+                    $"Auth Server đang chạy tại cổng {AuthServer.Port}."
                 );
+
+                // Khởi động Game Server (đa phòng)
+                _ = RunGameServerAsync();
+
+                Server_LogReceived(
+                    $"Đang khởi động Game Server tại cổng {server.Port}..."
+                );
+
+                lblStatus.Text = "Server đang chạy";
+
+                button2.Enabled = true;
+            }
+            catch (Exception ex)
+            {
+                authServer.Stop();
+                server.StopServer();
+
+                lblStatus.Text = "Server đang dừng";
 
                 button1.Enabled = true;
-            }
-            else
-            {
-                isDatabaseConnected = false;
-
-                lblStatus.Text = "Database mất kết nối";
-
-                richTextBox1.AppendText(
-                    "Database kết nối thất bại!" +
-                    Environment.NewLine +
-                    "Lỗi: " + error +
-                    Environment.NewLine
-                );
-
-                button1.Enabled = false;
+                button2.Enabled = false;
 
                 MessageBox.Show(
-                    "Không thể kết nối Database!\n" + error,
-                    "Database Error",
+                    "Không thể khởi động Server:\n" + ex.Message,
+                    "Lỗi Server",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error
                 );
             }
         }
 
-        private void button1_Click(object sender, EventArgs e)
+        // Chạy Game Server và cập nhật giao diện khi Server tự dừng
+        // (ví dụ: cổng đang bị chiếm)
+        private async Task RunGameServerAsync()
         {
-            if (server.IsRunning)
-                return;
+            await server.StartServer();
 
-            if (!isDatabaseConnected)
+            RunOnUi(() =>
             {
-                MessageBox.Show(
-                    "Database chưa kết nối!",
-                    "Thông báo",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning
-                );
+                // Nếu người dùng chưa bấm Stop mà Server đã dừng
+                if (button2.Enabled)
+                {
+                    authServer.Stop();
 
-                return;
-            }
+                    ResetServerLabels();
+                    listBox1.Items.Clear();
 
-            _ = server.StartServer();
-            authServer = new AuthServer(database);
-            authServer.Log += Server_LogReceived;
-            authServer.Start();
-
-            lblStatus.Text = "Server đang chạy";
-
-            button1.Enabled = false;
-            button2.Enabled = true;
+                    button1.Enabled = true;
+                    button2.Enabled = false;
+                }
+            });
         }
+
+        // =================================
+        // STOP SERVER
+        // =================================
 
         private void button2_Click(object sender, EventArgs e)
         {
-            server.StopServer();
-            authServer?.Stop();
-            authServer = null;
-
-            lblStatus.Text = "Server đang dừng";
-
-            button1.Enabled = true;
-            button2.Enabled = false;
+            StopAllServers();
         }
+
+        private void StopAllServers()
+        {
+            try
+            {
+                // Dừng Auth Server
+                authServer?.Stop();
+
+                // Dừng Game Server (đóng toàn bộ phòng)
+                server?.StopServer();
+
+                button1.Enabled = true;
+                button2.Enabled = false;
+
+                listBox1.Items.Clear();
+                ResetServerLabels();
+
+                Server_LogReceived("Đã dừng toàn bộ Server.");
+            }
+            catch (Exception ex)
+            {
+                Server_LogReceived("Lỗi khi dừng Server: " + ex.Message);
+            }
+        }
+
+        // =================================
+        // SERVER LOG
+        // =================================
 
         private void Server_LogReceived(string message)
         {
-            if (IsDisposed || !IsHandleCreated)
-                return;
-
-            BeginInvoke(new Action(() =>
+            RunOnUi(() =>
             {
-                if (!IsDisposed)
-                {
-                    richTextBox1.AppendText(message + Environment.NewLine);
-                }
-            }));
+                richTextBox1.AppendText(
+                    message + Environment.NewLine
+                );
+
+                richTextBox1.ScrollToCaret();
+            });
         }
+
+        // =================================
+        // CLIENT COUNT
+        // =================================
 
         private void Server_ClientCountChanged(int count)
         {
-            if (IsDisposed || !IsHandleCreated)
-                return;
-
-            BeginInvoke(new Action(() =>
+            RunOnUi(() =>
             {
-                if (IsDisposed)
-                    return;
-
-                listBox1.Items.Clear();
-
-                for (int i = 0; i < count; i++)
-                {
-                    listBox1.Items.Add("Player " + (i + 1));
-                }
-            }));
+                label2.Text =
+                    $"Danh sách Client ({count}/{server.MaxConnections})";
+            });
         }
+
+        // =================================
+        // ROOM COUNT
+        // =================================
+
+        private void Server_RoomCountChanged(int roomCount)
+        {
+            RunOnUi(() => UpdateInfoLabel(roomCount));
+        }
+
+        // =================================
+        // CLIENT LIST
+        // =================================
+
+        private void Server_ClientListChanged(string[] clients)
+        {
+            RunOnUi(() =>
+            {
+                listBox1.BeginUpdate();
+
+                try
+                {
+                    listBox1.Items.Clear();
+
+                    foreach (string client in clients)
+                    {
+                        listBox1.Items.Add(client);
+                    }
+                }
+                finally
+                {
+                    listBox1.EndUpdate();
+                }
+            });
+        }
+
+        // =================================
+        // FORM CLOSING
+        // =================================
 
         private void FormServer_FormClosing(
             object sender,
             FormClosingEventArgs e)
         {
-            server.StopServer();
-        }
-
-        private void label2_Click(object sender, EventArgs e)
-        {
-
+            StopAllServers();
         }
     }
 }

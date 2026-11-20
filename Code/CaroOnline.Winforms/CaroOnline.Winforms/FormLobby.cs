@@ -1,8 +1,8 @@
-
 using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using GameCaro;
@@ -53,6 +53,17 @@ namespace CaroOnline.Winforms
         private bool isConnecting;
         private bool loginRejected;
 
+        // Thách đấu
+        private Label? challengeText;
+        private LobbyButton? acceptChallengeButton;
+        private LobbyButton? declineChallengeButton;
+        private string? pendingChallenger;
+
+        // Đang mở cửa sổ trận đấu (tránh mở trùng khi server gửi ROOM_STATE nhiều lần)
+        private bool inMatchOpen;
+
+        private readonly ToolTip lobbyToolTip = new();
+
         public FormLobby()
         {
             InitializeComponent();
@@ -65,11 +76,18 @@ namespace CaroOnline.Winforms
                 pctbMark
             );
 
+            // Tạo SocketManager trên luồng giao diện để các event luôn chạy trên luồng này
             socketManager = new SocketManager();
 
-            socketManager.MessageReceived +=
-                SocketManager_MessageReceived;
-
+            socketManager.Welcomed += SocketManager_Welcomed;
+            socketManager.PlayerListReceived += SocketManager_PlayerListReceived;
+            socketManager.RoomListReceived += SocketManager_RoomListReceived;
+            socketManager.ChallengeReceived += SocketManager_ChallengeReceived;
+            socketManager.ChallengeRejected += SocketManager_ChallengeRejected;
+            socketManager.RoomStateReceived += SocketManager_RoomStateReceived;
+            socketManager.GameOver += SocketManager_GameOver;
+            socketManager.ErrorReceived += SocketManager_ErrorReceived;
+            socketManager.InfoReceived += SocketManager_InfoReceived;
             socketManager.Disconnected += SocketManager_Disconnected;
 
             ChessBoard.EndeGame += ChessBoard_EndeGame;
@@ -136,141 +154,333 @@ namespace CaroOnline.Winforms
 
         void Quit()
         {
-            socketManager.Close();
+            reconnectTimer?.Stop();
+            socketManager.Dispose();
 
             Application.Exit();
         }
 
         #endregion
 
-        #region Client Connection
+        #region Kết nối Server
 
-        public async Task ConnectToServer()  // Ket noi den Server
+        private async Task ConnectLobbyAsync()
         {
-            ClientNetworkSettings networkSettings = ClientNetworkSettings.Load();
-            string endpoint = $"{networkSettings.ServerAddress}:{networkSettings.ServerPort}";
-            if (!TryParseServerEndpoint(endpoint, out string host, out int port))
-            {
-                MessageBox.Show("Enter a valid server address in host:port format.");
-                return;
-            }
-
-            localPlayerName = txbPlayerName.Text.Trim();
-            if (localPlayerName.Length is < 1 or > 24)
-            {
-                MessageBox.Show("Player name must contain 1 to 24 characters.");
-                return;
-            }
-
-            bool result = await socketManager.ConnectServer(host, port, localPlayerName, resumeToken);
-
-            if (result)
-            {
-                isOnline = true;
-                ChessBoard.IsOnlineMode = true;
-                ChessBoard.CanMakeOnlineMove = false;
-                Lan.Enabled = false;
-                Text = $"CaroOnline - Connecting to {host}:{port}";
-            }
-            else
-            {
-                MessageBox.Show("Không thể kết nối Server!");
-            }
-        }
-
-        private void SocketManager_MessageReceived(string data) // Nhan du lieu tu Server
-        {
-            if (IsDisposed || !IsHandleCreated)
+            if (isConnecting || IsDisposed || socketManager.IsConnected)
                 return;
 
-            if (InvokeRequired)
-            {
-                BeginInvoke(new Action(() =>
-                {
-                    ProcessServerMessage(data);
-                }));
-
-                return;
-            }
-
-            ProcessServerMessage(data);
-        }
-
-        private void ProcessServerMessage(string data) // Xu ly thong diep Server
-        {
+            isConnecting = true;
+            loginRejected = false;
+            SetConnectionStatus("Đang kết nối server...", Muted);
             try
             {
-                Message? message =
-                    socketManager.DeserializeData<Message>(data);
+                ClientNetworkSettings networkSettings = ClientNetworkSettings.Load();
+                string host = string.IsNullOrWhiteSpace(AuthService.ServerHost)
+                    ? networkSettings.ServerAddress
+                    : AuthService.ServerHost;
+                localPlayerName = GetLobbyPlayerName();
+                if (playerListControl != null)
+                    playerListControl.SelfName = localPlayerName;
 
-                if (message == null)
-                    return;
+                // Thành công: event Welcomed sẽ cập nhật giao diện,
+                // sau đó server tự đẩy PLAYER_LIST và ROOM_LIST.
+                await socketManager.ConnectAsync(
+                    host,
+                    networkSettings.ServerPort,
+                    localPlayerName,
+                    string.IsNullOrEmpty(resumeToken) ? null : resumeToken);
+            }
+            catch (InvalidOperationException ex)
+            {
+                // Server từ chối (tên đang được dùng / không hợp lệ...). Server giữ tên
+                // trong thời gian chờ kết nối lại nên vẫn tiếp tục thử.
+                loginRejected = true;
+                SetConnectionStatus($"{ex.Message} · thử lại sau 5 giây", Coral);
+                reconnectTimer?.Start();
+            }
+            catch (Exception)
+            {
+                SetConnectionStatus("Không kết nối được server · thử lại sau 5 giây", Coral);
+                reconnectTimer?.Start();
+            }
+            finally
+            {
+                isConnecting = false;
+            }
+        }
 
-                switch (message.Type)
+        private void SocketManager_Welcomed(Message message)
+        {
+            resumeToken = message.ResumeToken ?? string.Empty;
+            isOnline = true;
+            loginRejected = false;
+            reconnectTimer?.Stop();
+            SetConnectionStatus($"● Đã kết nối · {message.Name}", Green);
+            RefreshLobbyLists();
+        }
+
+        private void SocketManager_Disconnected(string? reason)
+        {
+            if (IsDisposed)
+                return;
+
+            isOnline = false;
+            ShowChallenge(null);
+            ClearLobbyLists();
+            if (!loginRejected)
+                SetConnectionStatus("Mất kết nối server · đang thử lại...", Coral);
+            reconnectTimer?.Start();
+        }
+
+        private void SocketManager_PlayerListReceived(List<PlayerSummary> players)
+        {
+            onlinePlayers.Clear();
+            onlinePlayers.AddRange(players);
+            RefreshLobbyLists();
+        }
+
+        private void SocketManager_RoomListReceived(List<RoomSummary> rooms)
+        {
+            ongoingMatches.Clear();
+            ongoingMatches.AddRange(rooms.Where(room => !room.IsGameOver));
+            RefreshLobbyLists();
+        }
+
+        private void SocketManager_InfoReceived(string info)
+        {
+            if (!string.IsNullOrWhiteSpace(info))
+                SetConnectionStatus(info, Muted);
+        }
+
+        private void SocketManager_ErrorReceived(string code, string text)
+        {
+            // Lời thách đấu không còn hiệu lực (người thách đã thoát...)
+            if (code == "CHALLENGE_FAILED")
+                ShowChallenge(null);
+
+            SetConnectionStatus(string.IsNullOrWhiteSpace(text) ? "Lỗi từ server" : text, Coral);
+        }
+
+        private void SocketManager_GameOver(Message message)
+        {
+            string result = string.IsNullOrWhiteSpace(message.Result) ? message.Data ?? string.Empty : message.Result;
+            SetConnectionStatus($"Phòng {message.RoomId} đã kết thúc · {result}", Muted);
+            currentRoomId = string.Empty;
+            RefreshLobbyLists();
+        }
+
+        #endregion
+
+        #region Thách đấu
+
+        // Bấm tên người chơi trong danh sách để thách đấu
+        private async void PlayerListControl_PlayerSelected(PlayerSummary player)
+        {
+            if (!socketManager.IsConnected || socketManager.IsInRoom)
+                return;
+
+            if (string.Equals(player.Name, socketManager.PlayerName, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            if (player.InRoom)
+            {
+                SetConnectionStatus($"{player.Name} đang trong trận", Coral);
+                return;
+            }
+
+            DialogResult confirm = MessageBox.Show(
+                $"Thách đấu {player.Name}?",
+                "Thách đấu",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+
+            if (confirm != DialogResult.Yes)
+                return;
+
+            try
+            {
+                // Server trả INFO "Challenge sent to ..." hoặc ERROR nếu không thách được
+                await socketManager.ChallengeAsync(player.Name);
+            }
+            catch (Exception ex)
+            {
+                SetConnectionStatus("Không gửi được lời thách đấu: " + ex.Message, Coral);
+            }
+        }
+
+        // Có người thách đấu mình
+        private void SocketManager_ChallengeReceived(string challengerName)
+        {
+            if (string.IsNullOrWhiteSpace(challengerName))
+                return;
+
+            ShowChallenge(challengerName);
+        }
+
+        // Lời thách đấu của mình bị từ chối
+        private void SocketManager_ChallengeRejected(string rejecterName)
+        {
+            SetConnectionStatus($"{rejecterName} đã từ chối lời thách đấu", Coral);
+        }
+
+        private void ShowChallenge(string? challenger)
+        {
+            pendingChallenger = challenger;
+            bool hasChallenge = !string.IsNullOrEmpty(challenger);
+
+            if (challengeText != null)
+            {
+                challengeText.Text = hasChallenge ? $"{challenger} muốn đấu cùng bạn" : "Chưa có lời thách đấu";
+                challengeText.ForeColor = hasChallenge ? White : Muted;
+            }
+
+            if (acceptChallengeButton != null)
+                acceptChallengeButton.Enabled = hasChallenge;
+            if (declineChallengeButton != null)
+                declineChallengeButton.Enabled = hasChallenge;
+        }
+
+        private async void AcceptChallenge_Click(object? sender, EventArgs e)
+        {
+            string? challenger = pendingChallenger;
+            if (challenger == null)
+                return;
+
+            ShowChallenge(null);
+            if (challengeText != null)
+            {
+                challengeText.Text = "Đang tạo phòng...";
+                challengeText.ForeColor = Green;
+            }
+
+            try
+            {
+                // Server tạo phòng và gửi ROOM_STATE cho cả hai người
+                await socketManager.AcceptChallengeAsync(challenger);
+            }
+            catch (Exception ex)
+            {
+                SetConnectionStatus("Không chấp nhận được: " + ex.Message, Coral);
+            }
+        }
+
+        private async void DeclineChallenge_Click(object? sender, EventArgs e)
+        {
+            string? challenger = pendingChallenger;
+            if (challenger == null)
+                return;
+
+            ShowChallenge(null);
+            if (challengeText != null)
+            {
+                challengeText.Text = "Đã từ chối lời thách đấu";
+                challengeText.ForeColor = Coral;
+            }
+
+            try
+            {
+                await socketManager.RejectChallengeAsync(challenger);
+            }
+            catch (Exception ex)
+            {
+                SetConnectionStatus("Không gửi được phản hồi: " + ex.Message, Coral);
+            }
+        }
+
+        #endregion
+
+        #region Vào phòng (người chơi và khán giả)
+
+        // Bấm "VÀO XEM TRẬN ĐẤU"
+        private async void WatchMatch_Click()
+        {
+            RoomSummary? match = selectedMatch;
+            if (match == null || !socketManager.IsConnected || socketManager.IsInRoom)
+                return;
+
+            try
+            {
+                // Server trả ROOM_STATE (IsSpectator = true) nếu vào được,
+                // hoặc ERROR (ROOM_NOT_FOUND / SPECTATE_FAILED).
+                await socketManager.JoinSpectatorAsync(match.RoomId);
+            }
+            catch (Exception ex)
+            {
+                SetConnectionStatus("Không vào xem được: " + ex.Message, Coral);
+            }
+        }
+
+        // Server gửi ROOM_STATE khi người chơi vào phòng, chấp nhận thách đấu,
+        // khán giả vào xem hoặc kết nối lại vào phòng cũ.
+        private async void SocketManager_RoomStateReceived(Message state)
+        {
+            if (state == null)
+                return;
+
+            currentRoomId = state.RoomId ?? string.Empty;
+
+            // Tránh mở nhiều cửa sổ trận đấu cùng lúc.
+            if (inMatchOpen)
+                return;
+
+            inMatchOpen = true;
+            try
+            {
+                SetConnectionStatus(
+                    state.IsSpectator
+                        ? $"Đang xem phòng {state.RoomId}"
+                        : $"Đang đấu · phòng {state.RoomId}",
+                    Green);
+
+                // FormInMatch yêu cầu SocketManager và trạng thái phòng ban đầu.
+                OpenInMatch(state);
+            }
+            catch (Exception ex)
+            {
+                SetConnectionStatus(
+                    "Không thể mở trận đấu: " + ex.Message,
+                    Coral);
+            }
+            finally
+            {
+                inMatchOpen = false;
+                currentRoomId = string.Empty;
+            }
+
+            // Khi đóng FormInMatch, rời phòng hiện tại.
+            if (socketManager.IsConnected && socketManager.IsInRoom)
+            {
+                try
                 {
-                    case "CONNECT":
-                        MessageBox.Show("Đã kết nối Server");
-                        break;
-
-                    case "GAME_OVER":
-                        EndGame();
-                        break;
-
-                    case "NEW_GAME":
-                        NewGame();
-                        break;
-
-                    case "WELCOME":
-                        resumeToken = message.ResumeToken;
-                        isOnline = true;
-                        reconnectTimer?.Stop();
-                        SetConnectionStatus($"● Đã kết nối · {message.Name}", Green);
-                        RefreshLobbyLists();
-                        break;
-
-                    case "PLAYER_LIST":
-                        onlinePlayers.Clear();
-                        onlinePlayers.AddRange(message.Players);
-                        RefreshLobbyLists();
-                        break;
-
-                    case "ROOM_LIST":
-                        ongoingMatches.Clear();
-                        ongoingMatches.AddRange(message.Rooms.Where(room => !room.IsGameOver));
-                        RefreshLobbyLists();
-                        break;
-
-                    case "ERROR":
-                        HandleServerError(message);
-                        break;
-
-                    case "INFO":
-                        MessageBox.Show(message.Data);
-                        break;
+                    await socketManager.LeaveRoomAsync();
+                }
+                catch
+                {
+                    // Server tự xử lý khi kết nối bị mất.
                 }
             }
-            catch (Exception ex)
+
+            // Làm mới danh sách sau khi rời phòng.
+            if (socketManager.IsConnected)
             {
-                MessageBox.Show(
-                    "Lỗi xử lý dữ liệu: " + ex.Message
-                );
+                try
+                {
+                    await socketManager.RequestPlayersAsync();
+                    await socketManager.RequestRoomsAsync();
+                }
+                catch
+                {
+                    // Bỏ qua nếu kết nối bị gián đoạn.
+                }
             }
+
+            RefreshLobbyLists();
         }
 
-        private async Task SendMessage(Message message) // Gui thong diep den Server
+        private void OpenInMatch(Message initialState)
         {
-            if (!isOnline)
-                return;
-
-            try
-            {
-                string data = socketManager.SerializeData(message);
-                await socketManager.Send(data);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show("Unable to send message: " + ex.Message);
-            }
+            using var match = new FormInMatch(socketManager, initialState);
+            match.ShowDialog(this);
         }
 
         #endregion
@@ -355,8 +565,11 @@ namespace CaroOnline.Winforms
                 Size = new Size(198, 418),
                 BackColor = playersCard.BackColor,
                 EmptyText = "Chưa kết nối server",
-                SelfName = localPlayerName
+                SelfName = localPlayerName,
+                Cursor = Cursors.Hand
             };
+            playerListControl.PlayerSelected += PlayerListControl_PlayerSelected;
+            lobbyToolTip.SetToolTip(playerListControl, "Bấm vào tên người chơi để thách đấu");
             playersCard.Controls.Add(playerListControl);
             playersCard.Controls.Add(MakeLobbyLabel("● Rảnh", new Font("Segoe UI", 8.5F), Green,
                 new Point(14, 512), new Size(70, 20), ContentAlignment.MiddleLeft));
@@ -393,11 +606,7 @@ namespace CaroOnline.Winforms
             matchCard.Controls.Add(matchStatus);
             watchMatchButton = MakeLobbyButton("VÀO XEM TRẬN ĐẤU", new Point(30, 480), new Size(390, 44),
                 ColorTranslator.FromHtml("#112233"), Cyan, ColorTranslator.FromHtml("#1D3B58"));
-            watchMatchButton.Click += (_, _) =>
-            {
-                if (selectedMatch != null)
-                    OpenInMatch(asSpectator: true);
-            };
+            watchMatchButton.Click += (_, _) => WatchMatch_Click();
             matchCard.Controls.Add(watchMatchButton);
 
             var requestCard = MakeLobbyCard(new Point(712, 110), new Size(356, 140),
@@ -405,22 +614,18 @@ namespace CaroOnline.Winforms
             surface.Controls.Add(requestCard);
             requestCard.Controls.Add(MakeLobbyLabel("Yêu cầu thách đấu", new Font("Segoe UI", 11F, FontStyle.Bold), White,
                 new Point(14, 11), new Size(320, 24), ContentAlignment.MiddleLeft));
-            var challengeText = MakeLobbyLabel("Player 9 muốn đấu cùng bạn", new Font("Segoe UI", 9.5F), Muted,
+            challengeText = MakeLobbyLabel("Chưa có lời thách đấu", new Font("Segoe UI", 9.5F), Muted,
                 new Point(14, 38), new Size(320, 22), ContentAlignment.MiddleLeft);
             requestCard.Controls.Add(challengeText);
-            var acceptButton = MakeLobbyButton("✓ Chấp nhận", new Point(12, 82), new Size(154, 38),
+            acceptChallengeButton = MakeLobbyButton("✓ Chấp nhận", new Point(12, 82), new Size(154, 38),
                 ColorTranslator.FromHtml("#133829"), ColorTranslator.FromHtml("#4ADE80"), ColorTranslator.FromHtml("#1F5E43"));
-            var declineButton = MakeLobbyButton("✕ Từ chối", new Point(178, 82), new Size(164, 38),
+            declineChallengeButton = MakeLobbyButton("✕ Từ chối", new Point(178, 82), new Size(164, 38),
                 ColorTranslator.FromHtml("#361923"), Coral, ColorTranslator.FromHtml("#612637"));
-            acceptButton.Click += (_, _) =>
-            {
-                challengeText.Text = "Đã chấp nhận lời thách đấu";
-                challengeText.ForeColor = Green;
-                OpenInMatch();
-            };
-            declineButton.Click += (_, _) => { challengeText.Text = "Đã từ chối lời thách đấu"; challengeText.ForeColor = Coral; };
-            requestCard.Controls.Add(acceptButton);
-            requestCard.Controls.Add(declineButton);
+            acceptChallengeButton.Click += AcceptChallenge_Click;
+            declineChallengeButton.Click += DeclineChallenge_Click;
+            requestCard.Controls.Add(acceptChallengeButton);
+            requestCard.Controls.Add(declineChallengeButton);
+            ShowChallenge(null);
 
             var roomsCard = MakeLobbyCard(new Point(712, 266), new Size(356, 442),
                 ColorTranslator.FromHtml("#0E1622"), ColorTranslator.FromHtml("#1E2D3D"), 16);
@@ -459,12 +664,6 @@ namespace CaroOnline.Winforms
             RefreshLobbyLists();
         }
 
-        private void OpenInMatch(bool asSpectator = false)
-        {
-            using var match = new FormInMatch(asSpectator);
-            match.ShowDialog(this);
-        }
-
         #region Danh sách online & trận đang diễn ra
 
         /// <summary>Tên hiển thị gửi lên server; server chỉ nhận chữ, số, khoảng trắng, '_' và '-' (tối đa 24 ký tự).</summary>
@@ -481,51 +680,6 @@ namespace CaroOnline.Winforms
                 .Take(24)
                 .ToArray()).Trim();
             return cleaned.Length == 0 ? "Player" : cleaned;
-        }
-
-        private async Task ConnectLobbyAsync()
-        {
-            if (isConnecting || IsDisposed || socketManager.IsConnected)
-                return;
-
-            isConnecting = true;
-            loginRejected = false;
-            SetConnectionStatus("Đang kết nối server...", Muted);
-            try
-            {
-                ClientNetworkSettings networkSettings = ClientNetworkSettings.Load();
-                string host = string.IsNullOrWhiteSpace(AuthService.ServerHost)
-                    ? networkSettings.ServerAddress
-                    : AuthService.ServerHost;
-                localPlayerName = GetLobbyPlayerName();
-                if (playerListControl != null)
-                    playerListControl.SelfName = localPlayerName;
-
-                bool connected = await socketManager.ConnectServer(host, networkSettings.ServerPort, localPlayerName, resumeToken);
-                if (!connected)
-                {
-                    SetConnectionStatus("Không kết nối được server · thử lại sau 5 giây", Coral);
-                    reconnectTimer?.Start();
-                }
-                // Khi kết nối được, server trả WELCOME rồi tự đẩy PLAYER_LIST và ROOM_LIST.
-            }
-            finally
-            {
-                isConnecting = false;
-            }
-        }
-
-        private void HandleServerError(Message message)
-        {
-            if (message.ErrorCode == "INVALID_LOGIN")
-            {
-                // Server giữ tên trong thời gian chờ kết nối lại, nên vẫn tiếp tục thử.
-                loginRejected = true;
-                SetConnectionStatus("Tên đang được dùng hoặc không hợp lệ · thử lại sau 5 giây", Coral);
-                return;
-            }
-
-            SetConnectionStatus(string.IsNullOrWhiteSpace(message.Data) ? "Lỗi từ server" : message.Data, Coral);
         }
 
         private void SetConnectionStatus(string text, Color color)
@@ -595,7 +749,7 @@ namespace CaroOnline.Winforms
                 matchStatus.Invalidate();
             }
             if (watchMatchButton != null)
-                watchMatchButton.Enabled = match != null;
+                watchMatchButton.Enabled = match != null && isOnline && !socketManager.IsInRoom;
         }
 
         #endregion
@@ -815,44 +969,17 @@ namespace CaroOnline.Winforms
             menuToolStripMenuItem.DropDownItems.Add("Sảnh 10 phòng", null, (_, _) => LeaveRoomToLobbyUI());
         }
 
-        private bool TryParseServerEndpoint(string endpoint, out string host, out int port)
-        {
-            host = endpoint.Trim();
-            port = ClientNetworkSettings.Load().ServerPort;
-            int separator = host.LastIndexOf(':');
-            if (separator <= 0)
-                return !string.IsNullOrWhiteSpace(host);
-            if (!int.TryParse(host[(separator + 1)..], out int parsedPort) || parsedPort is < 1 or > 65535)
-                return false;
-            port = parsedPort;
-            host = host[..separator].Trim('[', ']');
-            return !string.IsNullOrWhiteSpace(host);
-        }
-
-        private void SocketManager_Disconnected()
-        {
-            if (IsDisposed || !IsHandleCreated)
-                return;
-            BeginInvoke(new Action(() =>
-            {
-                isOnline = false;
-                ClearLobbyLists();
-                if (!loginRejected)
-                    SetConnectionStatus("Mất kết nối server · đang thử lại...", Coral);
-                reconnectTimer?.Start();
-            }));
-        }
-
         private async void ChessBoard_OnlineMoveRequested(Point point, int playerIndex)
         {
-            await SendMessage(new Message
+            try
             {
-                Type = "MOVE",
-                RoomId = currentRoomId,
-                X = point.X,
-                Y = point.Y,
-                PlayerIndex = playerIndex
-            });
+                // Server dùng phòng và vị trí người chơi của chính phiên này
+                await socketManager.SendMoveAsync(point.X, point.Y);
+            }
+            catch (Exception ex)
+            {
+                SetConnectionStatus("Không gửi được nước đi: " + ex.Message, Coral);
+            }
         }
 
         private sealed class LocalRoomState
@@ -936,6 +1063,12 @@ namespace CaroOnline.Winforms
             protected override void OnMouseUp(MouseEventArgs e)
             {
                 base.OnMouseUp(e);
+                Invalidate();
+            }
+
+            protected override void OnEnabledChanged(EventArgs e)
+            {
+                base.OnEnabledChanged(e);
                 Invalidate();
             }
 
@@ -1304,6 +1437,9 @@ namespace CaroOnline.Winforms
         {
             public string SelfName = "";
 
+            // Bấm vào một người chơi trong danh sách
+            public event Action<PlayerSummary>? PlayerSelected;
+
             protected override int RowHeight => 33;
             protected override int RowSpacing => 6;
 
@@ -1327,6 +1463,11 @@ namespace CaroOnline.Winforms
                     isSelf ? Cyan : ColorTranslator.FromHtml("#E2E8F0"),
                     TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
                     TextFormatFlags.EndEllipsis);
+            }
+
+            protected override void OnRowClicked(PlayerSummary player)
+            {
+                PlayerSelected?.Invoke(player);
             }
         }
 
@@ -1472,7 +1613,7 @@ namespace CaroOnline.Winforms
             else
             {
                 reconnectTimer?.Stop();
-                socketManager.Close();
+                socketManager.Dispose();
             }
         }
 

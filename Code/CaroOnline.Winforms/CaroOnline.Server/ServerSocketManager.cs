@@ -1,318 +1,75 @@
-﻿
-using System;
-using System.Collections.Concurrent;
-using System.IO;
-using System.Net;
-using System.Net.Sockets;
-using System.Text;
-using System.Text.Json;
-using System.Threading;
+﻿using System;
 using System.Threading.Tasks;
 
 namespace CaroOnline.Server
 {
+    // Cổng vào của Game Server dành cho FormServer.
+    // Toàn bộ logic nhiều phòng nằm trong RoomServerManager.
     public class ServerSocketManager
     {
-        private readonly RoomServerManager roomServer;
+        private readonly RoomServerManager roomManager;
 
-        private TcpListener? listener;
-
-        private readonly ConcurrentDictionary<int, TcpClient> clients
-            = new ConcurrentDictionary<int, TcpClient>();
-
-        private readonly ConcurrentDictionary<int, SemaphoreSlim> sendLocks
-            = new ConcurrentDictionary<int, SemaphoreSlim>();
-
-        private readonly GameManager game = new GameManager();
-
-        private readonly SemaphoreSlim gameLock = new SemaphoreSlim(1, 1);
-
-        private CancellationTokenSource? cancellation;
+        // ==========================================
+        // CÁC EVENT GỬI THÔNG TIN VỀ FORMSERVER
+        // ==========================================
 
         public event Action<string>? LogReceived;
 
+        // Số kết nối đang mở
         public event Action<int>? ClientCountChanged;
 
-        public bool IsRunning => roomServer.IsRunning;
+        // Danh sách Client kèm vị trí (sảnh / phòng nào)
+        public event Action<string[]>? ClientListChanged;
 
-        public int ConnectedClientCount => roomServer.ConnectedClientCount;
+        // Số phòng đang chạy
+        public event Action<int>? RoomCountChanged;
+
+        // ==========================================
+        // THÔNG TIN SERVER
+        // ==========================================
+
+        public bool IsRunning => roomManager.IsRunning;
+
+        public int Port => roomManager.Port;
+
+        public int MaxConnections => roomManager.MaxConnections;
+
+        public int MaxRooms => roomManager.MaxRooms;
+
+        public int RoomCount => roomManager.RoomCount;
+
+        public int ConnectedClientCount => roomManager.ConnectedClientCount;
+
+        // ==========================================
+        // KHỞI TẠO
+        // ==========================================
 
         public ServerSocketManager(ServerSettings? settings = null)
         {
-            roomServer = new RoomServerManager(settings);
-            roomServer.LogReceived += message => LogReceived?.Invoke(message);
-            roomServer.ClientCountChanged += count => ClientCountChanged?.Invoke(count);
+            roomManager = new RoomServerManager(settings ?? ServerSettings.Load());
+
+            roomManager.LogReceived += message => LogReceived?.Invoke(message);
+
+            roomManager.ClientCountChanged += count => ClientCountChanged?.Invoke(count);
+
+            roomManager.ClientListChanged += clients => ClientListChanged?.Invoke(clients);
+
+            roomManager.RoomCountChanged += count => RoomCountChanged?.Invoke(count);
         }
 
-        public async Task StartServer()
+        // ==========================================
+        // START / STOP
+        // ==========================================
+
+        // Chạy cho đến khi Server dừng (hoặc không mở được cổng)
+        public Task StartServer()
         {
-            await roomServer.StartServer();
-        }
-
-        private async Task HandleClient(TcpClient client)
-        {
-            int playerIndex = -1;
-
-            try
-            {
-                playerIndex = GetFreePlayer();
-
-                if (playerIndex == -1)
-                {
-                    Log("Server đã đủ 2 người chơi.");
-                    client.Close();
-                    return;
-                }
-
-                clients[playerIndex] = client;
-
-                sendLocks[playerIndex] = new SemaphoreSlim(1, 1);
-
-                Log($"Player {playerIndex + 1} đã kết nối.");
-
-                ClientCountChanged?.Invoke(clients.Count);
-
-                using NetworkStream stream = client.GetStream();
-
-                using StreamReader reader =
-                    new StreamReader(stream, Encoding.UTF8);
-
-                await SendToClient(
-                    playerIndex,
-                    new Message
-                    {
-                        Type = "WELCOME",
-                        PlayerIndex = playerIndex
-                    });
-
-                await Broadcast(new Message
-                {
-                    Type = "PLAYER_COUNT",
-                    Data = clients.Count.ToString()
-                });
-
-                while (IsRunning && client.Connected)
-                {
-                    string? line = await reader.ReadLineAsync();
-
-                    if (line == null)
-                        break;
-
-                    Message? message =
-                        JsonSerializer.Deserialize<Message>(line);
-
-                    if (message == null)
-                        continue;
-
-                    await ProcessMessage(playerIndex, message);
-                }
-            }
-            catch (IOException ex)
-            {
-                Log("Lỗi truyền dữ liệu: " + ex.Message);
-            }
-            catch (JsonException ex)
-            {
-                Log("Dữ liệu JSON không hợp lệ: " + ex.Message);
-            }
-            catch (Exception ex)
-            {
-                Log("Lỗi Client: " + ex.Message);
-            }
-            finally
-            {
-                if (playerIndex != -1)
-                {
-                    if (clients.TryRemove(playerIndex, out _))
-                    {
-                        sendLocks.TryRemove(playerIndex, out _);
-
-                        Log($"Player {playerIndex + 1} đã ngắt kết nối.");
-
-                        ClientCountChanged?.Invoke(clients.Count);
-
-                        await Broadcast(new Message
-                        {
-                            Type = "PLAYER_COUNT",
-                            Data = clients.Count.ToString()
-                        });
-                    }
-                }
-
-                client.Close();
-            }
-        }
-
-        private int GetFreePlayer()
-        {
-            if (!clients.ContainsKey(0))
-                return 0;
-
-            if (!clients.ContainsKey(1))
-                return 1;
-
-            return -1;
-        }
-
-        private async Task ProcessMessage(
-            int playerIndex,
-            Message message)
-        {
-            await gameLock.WaitAsync();
-
-            try
-            {
-                switch (message.Type)
-                {
-                    case "MOVE":
-
-                        if (clients.Count != 2)
-                            return;
-
-                        if (!game.MakeMove(
-                            message.X,
-                            message.Y,
-                            playerIndex))
-                        {
-                            Log("Nước đi không hợp lệ.");
-                            return;
-                        }
-
-                        await Broadcast(new Message
-                        {
-                            Type = "MOVE",
-                            X = message.X,
-                            Y = message.Y,
-                            PlayerIndex = playerIndex
-                        });
-
-                        bool won = game.CheckWinner(
-                            message.X,
-                            message.Y,
-                            playerIndex);
-
-                        if (won)
-                        {
-                            await Broadcast(new Message
-                            {
-                                Type = "GAME_OVER",
-                                PlayerIndex = playerIndex,
-                                Data = "WIN"
-                            });
-
-                            Log($"Player {playerIndex + 1} đã chiến thắng.");
-                        }
-                        else if (game.IsBoardFull())
-                        {
-                            await Broadcast(new Message
-                            {
-                                Type = "GAME_OVER",
-                                Data = "DRAW"
-                            });
-                        }
-                        else
-                        {
-                            await Broadcast(new Message
-                            {
-                                Type = "TURN",
-                                PlayerIndex = game.CurrentPlayer
-                            });
-                        }
-
-                        break;
-
-                    case "UNDO":
-
-                        if (game.Undo())
-                        {
-                            await Broadcast(new Message
-                            {
-                                Type = "UNDO",
-                                PlayerIndex = game.CurrentPlayer
-                            });
-
-                            Log("Đã thực hiện Undo.");
-                        }
-
-                        break;
-
-                    case "NEW_GAME":
-
-                        game.NewGame();
-
-                        await Broadcast(new Message
-                        {
-                            Type = "NEW_GAME",
-                            PlayerIndex = 0
-                        });
-
-                        Log("Đã bắt đầu ván mới.");
-
-                        break;
-                }
-            }
-            finally
-            {
-                gameLock.Release();
-            }
-        }
-
-        private async Task Broadcast(Message message)
-        {
-            string json = JsonSerializer.Serialize(message);
-
-            foreach (var item in clients)
-            {
-                try
-                {
-                    await SendToClient(item.Key, message);
-                }
-                catch (Exception ex)
-                {
-                    Log("Không thể gửi dữ liệu đến Player "
-                        + (item.Key + 1) + ": " + ex.Message);
-                }
-            }
-        }
-
-        private async Task SendToClient(
-            int playerIndex,
-            Message message)
-        {
-            if (!clients.TryGetValue(playerIndex, out TcpClient? client))
-                return;
-
-            if (!sendLocks.TryGetValue(playerIndex, out SemaphoreSlim? sendLock))
-                return;
-
-            await sendLock.WaitAsync();
-
-            try
-            {
-                if (!client.Connected)
-                    return;
-
-                string json = JsonSerializer.Serialize(message);
-
-                byte[] data = Encoding.UTF8.GetBytes(json + "\n");
-
-                await client.GetStream().WriteAsync(data);
-            }
-            finally
-            {
-                sendLock.Release();
-            }
+            return roomManager.StartServer();
         }
 
         public void StopServer()
         {
-            roomServer.StopServer();
-        }
-
-        private void Log(string message)
-        {
-            LogReceived?.Invoke(
-                $"[{DateTime.Now:HH:mm:ss}] {message}");
+            roomManager.StopServer();
         }
     }
 }

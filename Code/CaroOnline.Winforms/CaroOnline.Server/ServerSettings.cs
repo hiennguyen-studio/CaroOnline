@@ -5,9 +5,20 @@ namespace CaroOnline.Server
 {
     public sealed class ServerSettings
     {
+        private static readonly JsonSerializerOptions LoadOptions = new()
+        {
+            PropertyNameCaseInsensitive = true,
+            ReadCommentHandling = JsonCommentHandling.Skip,
+            AllowTrailingCommas = true
+        };
+
         public string ListenAddress { get; set; } = "0.0.0.0";
         public int Port { get; set; } = 9999;
         public int MaxConnections { get; set; } = 15;
+
+        // Số trận (phòng) được chạy cùng lúc
+        public int MaxRooms { get; set; } = 7;
+
         public int MaxFrameBytes { get; set; } = 65536;
         public int HandshakeTimeoutSeconds { get; set; } = 10;
         public int TurnSeconds { get; set; } = 30;
@@ -18,14 +29,41 @@ namespace CaroOnline.Server
 
         public static ServerSettings Load(string? filePath = null)
         {
-            string path = filePath ?? Path.Combine(AppContext.BaseDirectory, "appsettings.json");
-            if (!File.Exists(path))
+            string? path = filePath ?? FindSettingsFile();
+            if (path == null)
                 return new ServerSettings();
 
-            ServerSettings? settings = JsonSerializer.Deserialize<ServerSettings>(File.ReadAllText(path));
+            ServerSettings? settings;
+            try
+            {
+                settings = JsonSerializer.Deserialize<ServerSettings>(File.ReadAllText(path), LoadOptions);
+            }
+            catch (JsonException ex)
+            {
+                throw new InvalidDataException($"Không đọc được file cấu hình '{path}': {ex.Message}");
+            }
+
             settings ??= new ServerSettings();
             settings.Validate();
             return settings;
+        }
+
+        // Tìm appsettings.json cạnh file chạy, hoặc trong thư mục data
+        private static string? FindSettingsFile()
+        {
+            string[] candidates =
+            {
+                Path.Combine(AppContext.BaseDirectory, "appsettings.json"),
+                Path.Combine(AppContext.BaseDirectory, "data", "appsettings.json")
+            };
+
+            foreach (string candidate in candidates)
+            {
+                if (File.Exists(candidate))
+                    return candidate;
+            }
+
+            return null;
         }
 
         public void Validate()
@@ -36,6 +74,8 @@ namespace CaroOnline.Server
                 throw new InvalidDataException("Port must be between 1 and 65535.");
             if (MaxConnections is < 2 or > 256)
                 throw new InvalidDataException("MaxConnections must be between 2 and 256.");
+            if (MaxRooms is < 1 or > 128)
+                throw new InvalidDataException("MaxRooms must be between 1 and 128.");
             if (MaxFrameBytes is < 1024 or > 1_048_576)
                 throw new InvalidDataException("MaxFrameBytes must be between 1024 and 1048576.");
             if (HandshakeTimeoutSeconds is < 1 or > 60)

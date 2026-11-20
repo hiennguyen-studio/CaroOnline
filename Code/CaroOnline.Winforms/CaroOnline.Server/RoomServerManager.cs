@@ -7,11 +7,17 @@ using System.Text.Json;
 
 namespace CaroOnline.Server
 {
+    // Lõi đa phòng: mỗi trận là một GameRoom riêng (GameManager, đồng hồ lượt, khóa, khán giả riêng)
     public sealed class RoomServerManager
     {
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
             PropertyNameCaseInsensitive = true
+        };
+
+        private static readonly JsonSerializerOptions HistoryWriteOptions = new()
+        {
+            WriteIndented = true
         };
 
         private readonly ServerSettings settings;
@@ -29,8 +35,15 @@ namespace CaroOnline.Server
 
         public event Action<string>? LogReceived;
         public event Action<int>? ClientCountChanged;
+        public event Action<string[]>? ClientListChanged;
+        public event Action<int>? RoomCountChanged;
+
         public bool IsRunning { get; private set; }
         public int ConnectedClientCount => clients.Count;
+        public int RoomCount => rooms.Count;
+        public int Port => settings.Port;
+        public int MaxConnections => settings.MaxConnections;
+        public int MaxRooms => settings.MaxRooms;
 
         public RoomServerManager(ServerSettings? serverSettings = null)
         {
@@ -38,57 +51,153 @@ namespace CaroOnline.Server
             settings.Validate();
         }
 
+        // ==========================================
+        // START / STOP
+        // ==========================================
+
         public async Task StartServer()
         {
             if (IsRunning)
                 return;
 
+            ResetState();
+
+            CancellationTokenSource cancellation = new();
+            serverCancellation = cancellation;
+            CancellationToken token = cancellation.Token;
+
+            TcpListener? tcpListener = null;
+            bool listening = false;
+
             try
             {
-                serverCancellation = new CancellationTokenSource();
-                listener = new TcpListener(IPAddress.Parse(settings.ListenAddress), settings.Port);
-                listener.Start();
+                tcpListener = new TcpListener(IPAddress.Parse(settings.ListenAddress), settings.Port);
+                tcpListener.Start();
+                listener = tcpListener;
+                listening = true;
                 IsRunning = true;
-                Log($"Server listening on {settings.ListenAddress}:{settings.Port}.");
 
-                while (!serverCancellation.IsCancellationRequested)
+                Log($"Game Server đang chạy tại {settings.ListenAddress}:{settings.Port} " +
+                    $"(tối đa {settings.MaxRooms} phòng cùng lúc).");
+
+                while (!token.IsCancellationRequested)
                 {
-                    TcpClient client = await listener.AcceptTcpClientAsync(serverCancellation.Token);
+                    TcpClient client = await tcpListener.AcceptTcpClientAsync(token);
+
                     if (clients.Count >= settings.MaxConnections)
                     {
                         client.Close();
-                        Log("Rejected connection: configured connection limit reached.");
+                        Log("Từ chối kết nối: đã đạt giới hạn số kết nối.");
                         continue;
                     }
 
                     int connectionId = Interlocked.Increment(ref nextConnectionId);
                     clients[connectionId] = client;
                     ClientCountChanged?.Invoke(clients.Count);
-                    _ = HandleConnectionAsync(connectionId, client, serverCancellation.Token);
+                    _ = HandleConnectionAsync(connectionId, client, token);
                 }
             }
             catch (OperationCanceledException)
             {
-                Log("Server stopped accepting connections.");
+                Log("Server đã ngừng nhận kết nối.");
             }
             catch (ObjectDisposedException)
             {
-                // Listener was closed during shutdown.
+                // Listener đã bị đóng khi dừng Server.
             }
             catch (SocketException ex)
             {
-                if (IsRunning)
-                    Log("Socket error: " + ex.Message);
+                if (!listening)
+                    Log($"Không thể mở cổng {settings.Port}: {ex.Message}");
+                else if (IsRunning)
+                    Log("Lỗi Socket: " + ex.Message);
             }
             catch (Exception ex)
             {
-                Log("Server error: " + ex.Message);
+                Log("Lỗi Server: " + ex.Message);
             }
             finally
             {
-                IsRunning = false;
+                // Tránh ghi đè trạng thái nếu Server đã được khởi động lại
+                if (ReferenceEquals(serverCancellation, cancellation))
+                    IsRunning = false;
+
+                cancellation.Cancel();
+
+                try
+                {
+                    tcpListener?.Stop();
+                }
+                catch
+                {
+                    // Bỏ qua lỗi khi đóng Listener.
+                }
+
+                if (ReferenceEquals(listener, tcpListener))
+                    listener = null;
             }
         }
+
+        public void StopServer()
+        {
+            if (!IsRunning)
+                return;
+
+            IsRunning = false;
+            serverCancellation?.Cancel();
+
+            try
+            {
+                listener?.Stop();
+            }
+            catch
+            {
+                // Bỏ qua lỗi khi đóng Listener.
+            }
+
+            foreach (TcpClient client in clients.Values)
+            {
+                try
+                {
+                    client.Close();
+                }
+                catch
+                {
+                    // Bỏ qua lỗi khi đóng Client.
+                }
+            }
+
+            clients.Clear();
+
+            // Hủy đồng hồ của mọi phòng, xóa toàn bộ phòng và phiên
+            ResetState();
+
+            ClientCountChanged?.Invoke(0);
+            ClientListChanged?.Invoke(Array.Empty<string>());
+            RoomCountChanged?.Invoke(0);
+
+            Log("Đã dừng Server.");
+        }
+
+        // Hủy mọi bộ đếm và xóa sạch trạng thái phòng/phiên
+        private void ResetState()
+        {
+            foreach (GameRoom room in rooms.Values)
+                room.TurnTimer?.Cancel();
+
+            foreach (ServerSession session in sessionsByName.Values)
+                session.ReconnectExpiry?.Cancel();
+
+            rooms.Clear();
+            pendingChallenges.Clear();
+            activeSessions.Clear();
+            sessionsByToken.Clear();
+            sessionsByName.Clear();
+        }
+
+        // ==========================================
+        // KẾT NỐI
+        // ==========================================
 
         private async Task HandleConnectionAsync(int connectionId, TcpClient client, CancellationToken serverToken)
         {
@@ -130,7 +239,7 @@ namespace CaroOnline.Server
 
                 await BroadcastPlayerListAsync(serverToken);
                 await SendRoomListAsync(null, serverToken);
-                Log($"{session.Name} connected.");
+                Log($"{session.Name} đã kết nối.");
 
                 while (!serverToken.IsCancellationRequested)
                 {
@@ -148,31 +257,31 @@ namespace CaroOnline.Server
             }
             catch (OperationCanceledException)
             {
-                // Server shutdown or connection handshake timeout.
+                // Server dừng hoặc hết thời gian chờ handshake.
             }
             catch (InvalidDataException ex)
             {
                 if (session != null)
-                    await SendErrorAsync(session, "INVALID_FRAME", ex.Message, serverToken);
-                Log("Invalid network frame: " + ex.Message);
+                    await SendErrorAsync(session, "INVALID_FRAME", ex.Message, CancellationToken.None);
+                Log("Khung dữ liệu không hợp lệ: " + ex.Message);
             }
             catch (JsonException ex)
             {
                 if (session != null)
-                    await SendErrorAsync(session, "INVALID_JSON", "Message payload is not valid JSON.", serverToken);
-                Log("Invalid JSON received: " + ex.Message);
+                    await SendErrorAsync(session, "INVALID_JSON", "Message payload is not valid JSON.", CancellationToken.None);
+                Log("JSON không hợp lệ: " + ex.Message);
             }
             catch (IOException ex)
             {
-                Log("Connection I/O ended: " + ex.Message);
+                Log("Kết nối I/O đã kết thúc: " + ex.Message);
             }
             catch (SocketException ex)
             {
-                Log("Connection socket ended: " + ex.Message);
+                Log("Kết nối socket đã kết thúc: " + ex.Message);
             }
             catch (Exception ex)
             {
-                Log("Client handler error: " + ex.Message);
+                Log("Lỗi xử lý Client: " + ex.Message);
             }
             finally
             {
@@ -181,6 +290,7 @@ namespace CaroOnline.Server
                     await HandleSessionDisconnectedAsync(connectionId, session);
                 client.Close();
                 ClientCountChanged?.Invoke(clients.Count);
+                PublishState();
             }
         }
 
@@ -229,6 +339,10 @@ namespace CaroOnline.Server
             }
         }
 
+        // ==========================================
+        // XỬ LÝ MESSAGE
+        // ==========================================
+
         private async Task ProcessMessageAsync(ServerSession session, Message message, CancellationToken token)
         {
             switch (message.Type.Trim().ToUpperInvariant())
@@ -272,6 +386,10 @@ namespace CaroOnline.Server
             }
         }
 
+        // ==========================================
+        // THÁCH ĐẤU VÀ TẠO PHÒNG
+        // ==========================================
+
         private async Task SendChallengeAsync(ServerSession challenger, Message message, CancellationToken token)
         {
             string targetName = (message.TargetName ?? string.Empty).Trim();
@@ -290,6 +408,8 @@ namespace CaroOnline.Server
                     error = "The selected player is not online.";
                 else if (!string.IsNullOrEmpty(target.RoomId) || !string.IsNullOrEmpty(challenger.RoomId))
                     error = "Both players must be outside a room.";
+                else if (rooms.Count >= settings.MaxRooms)
+                    error = "The server has reached its room limit. Try again later.";
                 else if (!pendingChallenges.TryAdd(target.Name, challenger.Name))
                     error = "The target already has a pending challenge.";
             }
@@ -320,14 +440,31 @@ namespace CaroOnline.Server
             {
                 if (!pendingChallenges.TryGetValue(accepter.Name, out string? pendingName) ||
                     !string.Equals(pendingName, challengerName, StringComparison.OrdinalIgnoreCase))
+                {
                     error = "There is no matching pending challenge.";
+                }
                 else if (!sessionsByName.TryGetValue(challengerName, out challenger) || challenger.Client == null)
+                {
                     error = "The challenger is no longer online.";
+                    pendingChallenges.TryRemove(accepter.Name, out _);
+                }
                 else if (!string.IsNullOrEmpty(accepter.RoomId) || !string.IsNullOrEmpty(challenger.RoomId))
+                {
                     error = "One of the players is already in a room.";
+                }
+                else if (rooms.Count >= settings.MaxRooms)
+                {
+                    error = "The server has reached its room limit. Try again later.";
+                }
                 else
                 {
-                    string roomId = Guid.NewGuid().ToString("N")[..8];
+                    string roomId;
+                    do
+                    {
+                        roomId = Guid.NewGuid().ToString("N")[..8];
+                    }
+                    while (rooms.ContainsKey(roomId));
+
                     room = new GameRoom
                     {
                         RoomId = roomId,
@@ -361,16 +498,28 @@ namespace CaroOnline.Server
             await BroadcastRoomAsync(room, CreateRoomStateMessage(room), token);
             await BroadcastPlayerListAsync(token);
             await SendRoomListAsync(null, token);
-            Log($"Room {room.RoomId} started: {room.PlayerOneName} vs {room.PlayerTwoName}.");
+            Log($"Phòng {room.RoomId} bắt đầu: {room.PlayerOneName} vs {room.PlayerTwoName} " +
+                $"({rooms.Count}/{settings.MaxRooms} phòng).");
         }
 
         private async Task RejectChallengeAsync(ServerSession rejecter, Message message, CancellationToken token)
         {
             string challengerName = (message.TargetName ?? string.Empty).Trim();
-            pendingChallenges.TryRemove(rejecter.Name, out _);
+
+            // Chỉ hủy lời thách đấu nếu đúng người thách đấu
+            if (pendingChallenges.TryGetValue(rejecter.Name, out string? pendingName) &&
+                string.Equals(pendingName, challengerName, StringComparison.OrdinalIgnoreCase))
+            {
+                pendingChallenges.TryRemove(rejecter.Name, out _);
+            }
+
             if (sessionsByName.TryGetValue(challengerName, out ServerSession? challenger))
                 await SendToSessionAsync(challenger, new Message { Type = "CHALLENGE_REJECT", Name = rejecter.Name }, token);
         }
+
+        // ==========================================
+        // KHÁN GIẢ VÀ RỜI PHÒNG
+        // ==========================================
 
         private async Task AddSpectatorToRoomAsync(ServerSession spectator, string roomId, CancellationToken token)
         {
@@ -411,6 +560,7 @@ namespace CaroOnline.Server
 
             await SendRoomSnapshotAsync(spectator, room, token);
             await BroadcastRoomAsync(room, CreateRoomStateMessage(room), token);
+            await BroadcastPlayerListAsync(token);
             await SendRoomListAsync(null, token);
         }
 
@@ -436,28 +586,44 @@ namespace CaroOnline.Server
                     room.SyncLock.Release();
                 }
                 await BroadcastRoomAsync(room, CreateRoomStateMessage(room), token);
+                await BroadcastPlayerListAsync(token);
                 await SendRoomListAsync(null, token);
                 return;
             }
 
             MatchHistoryRecord? record = null;
+            List<ServerSession> recipients;
             await room.SyncLock.WaitAsync(token);
             try
             {
+                // Lấy danh sách người nhận TRƯỚC khi đóng phòng (đóng phòng sẽ xóa khán giả)
+                recipients = GetRoomSessions(room);
                 record = FinishRoom(room, session.PlayerIndex == 0 ? "PLAYER_TWO_WIN_BY_FORFEIT" : "PLAYER_ONE_WIN_BY_FORFEIT");
             }
             finally
             {
                 room.SyncLock.Release();
             }
+
             if (record != null)
             {
-                await BroadcastRoomAsync(room, new Message { Type = "GAME_OVER", RoomId = room.RoomId, Result = record.Result, Data = record.Result }, token);
+                await BroadcastToSessionsAsync(recipients, new Message
+                {
+                    Type = "GAME_OVER",
+                    RoomId = room.RoomId,
+                    Result = record.Result,
+                    Data = record.Result
+                }, token);
                 await SaveMatchHistoryAsync(record, token);
                 await BroadcastPlayerListAsync(token);
                 await SendRoomListAsync(null, token);
+                Log($"Phòng {room.RoomId} kết thúc: {record.Result}.");
             }
         }
+
+        // ==========================================
+        // NƯỚC ĐI, UNDO, VÁN MỚI
+        // ==========================================
 
         private async Task ValidateAndApplyMoveAsync(ServerSession session, Message message, CancellationToken token)
         {
@@ -473,20 +639,24 @@ namespace CaroOnline.Server
             }
 
             MatchHistoryRecord? completedRecord = null;
+            Message? rejection = null;
             List<ServerSession> recipients;
             List<Message> outgoing = new();
             await room.SyncLock.WaitAsync(token);
             try
             {
+                // Lấy danh sách người nhận TRƯỚC khi có thể đóng phòng
+                recipients = GetRoomSessions(room);
+
                 int playerIndex = session.PlayerIndex ?? -1;
                 if (room.IsPaused || (playerIndex != 0 && playerIndex != 1) ||
                     !ReferenceEquals(playerIndex == 0 ? room.PlayerOne : room.PlayerTwo, session))
                 {
-                    outgoing.Add(CreateError("NOT_A_PLAYER", "Only a connected player in this room can move."));
+                    rejection = CreateError("NOT_A_PLAYER", "Only a connected player in this room can move.");
                 }
                 else if (!room.Game.MakeMove(message.X, message.Y, playerIndex))
                 {
-                    outgoing.Add(CreateError("INVALID_MOVE", "Move must be in bounds, on an empty cell, and made by the player whose turn it is."));
+                    rejection = CreateError("INVALID_MOVE", "Move must be in bounds, on an empty cell, and made by the player whose turn it is.");
                 }
                 else
                 {
@@ -503,8 +673,6 @@ namespace CaroOnline.Server
 
                     if (won || draw)
                     {
-                        if (draw)
-                            room.Game.FinishInDraw();
                         completedRecord = FinishRoom(room, draw ? "DRAW" : playerIndex == 0 ? "PLAYER_ONE_WIN" : "PLAYER_TWO_WIN");
                         outgoing.Add(new Message
                         {
@@ -527,21 +695,28 @@ namespace CaroOnline.Server
                         });
                     }
                 }
-                recipients = GetRoomSessions(room);
             }
             finally
             {
                 room.SyncLock.Release();
             }
 
+            // Nước đi bị từ chối chỉ báo lỗi cho người gửi, không gửi cho cả phòng
+            if (rejection != null)
+            {
+                await SendToSessionAsync(session, rejection, token);
+                return;
+            }
+
             foreach (Message update in outgoing)
                 await BroadcastToSessionsAsync(recipients, update, token);
+
             if (completedRecord != null)
             {
                 await SaveMatchHistoryAsync(completedRecord, token);
                 await BroadcastPlayerListAsync(token);
                 await SendRoomListAsync(null, token);
-                Log($"Room {room.RoomId} completed: {completedRecord.Result}.");
+                Log($"Phòng {room.RoomId} kết thúc: {completedRecord.Result}.");
             }
         }
 
@@ -557,8 +732,9 @@ namespace CaroOnline.Server
             await room.SyncLock.WaitAsync(token);
             try
             {
-                List<MatchMove> moves = room.Game.GetMoveHistory();
-                if (moves.Count > 0 && moves[^1].PlayerIndex == session.PlayerIndex && room.Game.Undo())
+                if (!room.IsPaused &&
+                    room.Game.LastMovePlayerIndex == session.PlayerIndex &&
+                    room.Game.Undo())
                 {
                     undone = true;
                     StartTurnTimer(room);
@@ -587,8 +763,20 @@ namespace CaroOnline.Server
             try
             {
                 room.Game.NewGame();
-                room.IsPaused = false;
-                StartTurnTimer(room);
+
+                // Chỉ tiếp tục khi CẢ HAI người chơi đang online
+                bool bothOnline = room.PlayerOne.Client != null && room.PlayerTwo.Client != null;
+                room.IsPaused = !bothOnline;
+
+                if (bothOnline)
+                {
+                    StartTurnTimer(room);
+                }
+                else
+                {
+                    room.TurnTimer?.Cancel();
+                    room.TurnDeadlineUtc = null;
+                }
             }
             finally
             {
@@ -596,6 +784,10 @@ namespace CaroOnline.Server
             }
             await BroadcastRoomAsync(room, CreateRoomStateMessage(room), token);
         }
+
+        // ==========================================
+        // ĐỒNG HỒ LƯỢT (MỖI PHÒNG MỘT ĐỒNG HỒ)
+        // ==========================================
 
         private void StartTurnTimer(GameRoom room)
         {
@@ -621,16 +813,20 @@ namespace CaroOnline.Server
                     MatchHistoryRecord? completedRecord = null;
                     Message? timerMessage = null;
                     List<ServerSession> recipients;
+                    int winner = -1;
                     await room.SyncLock.WaitAsync(timer.Token);
                     try
                     {
                         if (!ReferenceEquals(room.TurnTimer, timer) || room.Game.IsGameOver || room.IsPaused)
                             return;
+
+                        // Lấy danh sách người nhận TRƯỚC khi có thể đóng phòng
+                        recipients = GetRoomSessions(room);
+
                         int remaining = Math.Max(0, (int)Math.Ceiling((room.TurnDeadlineUtc!.Value - DateTime.UtcNow).TotalSeconds));
                         if (remaining == 0)
                         {
-                            int winner = 1 - room.Game.CurrentPlayer;
-                            room.Game.FinishGame();
+                            winner = 1 - room.Game.CurrentPlayer;
                             completedRecord = FinishRoom(room, winner == 0 ? "PLAYER_ONE_WIN_BY_TIMEOUT" : "PLAYER_TWO_WIN_BY_TIMEOUT");
                         }
                         else
@@ -644,7 +840,6 @@ namespace CaroOnline.Server
                                 TurnDeadlineUtc = room.TurnDeadlineUtc
                             };
                         }
-                        recipients = GetRoomSessions(room);
                     }
                     finally
                     {
@@ -653,44 +848,55 @@ namespace CaroOnline.Server
 
                     if (timerMessage != null)
                         await BroadcastToSessionsAsync(recipients, timerMessage, CancellationToken.None);
+
                     if (completedRecord != null)
                     {
                         await BroadcastToSessionsAsync(recipients, new Message
                         {
                             Type = "GAME_OVER",
                             RoomId = room.RoomId,
-                            PlayerIndex = 1 - room.Game.CurrentPlayer,
+                            PlayerIndex = winner,
                             Result = completedRecord.Result,
                             Data = completedRecord.Result
                         }, CancellationToken.None);
                         await SaveMatchHistoryAsync(completedRecord, CancellationToken.None);
                         await BroadcastPlayerListAsync(CancellationToken.None);
                         await SendRoomListAsync(null, CancellationToken.None);
-                        Log($"Room {room.RoomId} ended on turn timeout.");
+                        Log($"Phòng {room.RoomId} kết thúc do hết giờ.");
                         return;
                     }
                 }
             }
             catch (OperationCanceledException)
             {
-                // A move, reconnect, or server shutdown replaced this timer.
+                // Có nước đi, kết nối lại hoặc Server dừng và đã thay thế đồng hồ này.
+            }
+            catch (ObjectDisposedException)
+            {
+                // Đồng hồ đã bị hủy và giải phóng.
             }
             catch (Exception ex)
             {
-                Log("Turn timer error: " + ex.Message);
+                Log("Lỗi đồng hồ lượt: " + ex.Message);
             }
         }
 
+        // ==========================================
+        // KẾT THÚC PHÒNG
+        // ==========================================
+
+        // Gọi khi đang giữ room.SyncLock. Trả về null nếu phòng đã được đóng trước đó.
         private MatchHistoryRecord? FinishRoom(GameRoom room, string result)
         {
-            if (room.Game.IsGameOver && !rooms.ContainsKey(room.RoomId))
+            // Chỉ một luồng đóng được phòng (tránh lưu lịch sử hai lần)
+            if (!rooms.TryRemove(room.RoomId, out _))
                 return null;
+
             room.Game.FinishGame();
             room.TurnTimer?.Cancel();
             room.TurnTimer?.Dispose();
             room.TurnTimer = null;
             room.TurnDeadlineUtc = null;
-            rooms.TryRemove(room.RoomId, out _);
             room.PlayerOne.RoomId = string.Empty;
             room.PlayerOne.PlayerIndex = null;
             room.PlayerTwo.RoomId = string.Empty;
@@ -713,6 +919,10 @@ namespace CaroOnline.Server
             };
         }
 
+        // ==========================================
+        // MẤT KẾT NỐI VÀ KẾT NỐI LẠI
+        // ==========================================
+
         private async Task HandleSessionDisconnectedAsync(int connectionId, ServerSession session)
         {
             await lobbyLock.WaitAsync();
@@ -725,13 +935,15 @@ namespace CaroOnline.Server
                 session.ConnectionId = -1;
                 session.DisconnectedAtUtc = DateTime.UtcNow;
 
+                // Lời thách đấu liên quan đến người này không còn hiệu lực
+                RemovePendingChallenges(session.Name);
+
                 if (session.IsSpectator && rooms.TryGetValue(session.RoomId, out GameRoom? spectatorRoom))
                 {
                     spectatorRoom.Spectators.TryRemove(session.SessionId, out _);
                     session.RoomId = string.Empty;
                     session.IsSpectator = false;
                 }
-
                 else if (session.PlayerIndex.HasValue && rooms.TryGetValue(session.RoomId, out GameRoom? room))
                 {
                     await room.SyncLock.WaitAsync();
@@ -765,7 +977,7 @@ namespace CaroOnline.Server
                 lobbyLock.Release();
             }
 
-            Log($"{session.Name} disconnected; reconnect grace is {settings.ReconnectSeconds} seconds.");
+            Log($"{session.Name} mất kết nối; thời gian chờ kết nối lại là {settings.ReconnectSeconds} giây.");
             await BroadcastPlayerListAsync(CancellationToken.None);
             await SendRoomListAsync(null, CancellationToken.None);
         }
@@ -778,8 +990,12 @@ namespace CaroOnline.Server
             await room.SyncLock.WaitAsync(token);
             try
             {
-                room.IsPaused = false;
-                StartTurnTimer(room);
+                // Chỉ tiếp tục ván khi CẢ HAI người chơi đang online
+                if (room.PlayerOne.Client != null && room.PlayerTwo.Client != null)
+                {
+                    room.IsPaused = false;
+                    StartTurnTimer(room);
+                }
             }
             finally
             {
@@ -801,6 +1017,7 @@ namespace CaroOnline.Server
                 await Task.Delay(TimeSpan.FromSeconds(settings.ReconnectSeconds), expiry.Token);
                 MatchHistoryRecord? record = null;
                 GameRoom? affectedRoom = null;
+                List<ServerSession> recipients = new();
                 await lobbyLock.WaitAsync(expiry.Token);
                 try
                 {
@@ -808,13 +1025,15 @@ namespace CaroOnline.Server
                         return;
                     sessionsByToken.TryRemove(session.ResumeToken, out _);
                     sessionsByName.TryRemove(session.Name, out _);
+                    RemovePendingChallenges(session.Name);
                     if (!string.IsNullOrEmpty(session.RoomId) && rooms.TryGetValue(session.RoomId, out affectedRoom) && session.PlayerIndex.HasValue)
                     {
                         await affectedRoom.SyncLock.WaitAsync(expiry.Token);
                         try
                         {
+                            // Lấy danh sách người nhận TRƯỚC khi đóng phòng
+                            recipients = GetRoomSessions(affectedRoom);
                             int winner = 1 - session.PlayerIndex.Value;
-                            affectedRoom.Game.FinishGame();
                             record = FinishRoom(affectedRoom, winner == 0 ? "PLAYER_ONE_WIN_BY_DISCONNECT" : "PLAYER_TWO_WIN_BY_DISCONNECT");
                         }
                         finally
@@ -830,7 +1049,7 @@ namespace CaroOnline.Server
 
                 if (record != null && affectedRoom != null)
                 {
-                    await BroadcastRoomAsync(affectedRoom, new Message
+                    await BroadcastToSessionsAsync(recipients, new Message
                     {
                         Type = "GAME_OVER",
                         RoomId = affectedRoom.RoomId,
@@ -838,20 +1057,41 @@ namespace CaroOnline.Server
                         Data = record.Result
                     }, CancellationToken.None);
                     await SaveMatchHistoryAsync(record, CancellationToken.None);
+                    Log($"Phòng {affectedRoom.RoomId} kết thúc: {record.Result}.");
                 }
                 await BroadcastPlayerListAsync(CancellationToken.None);
                 await SendRoomListAsync(null, CancellationToken.None);
-                Log($"Reconnect grace expired for {session.Name}.");
+                Log($"Hết thời gian chờ kết nối lại của {session.Name}.");
             }
             catch (OperationCanceledException)
             {
-                // The player resumed before the grace period expired.
+                // Người chơi đã kết nối lại trước khi hết thời gian chờ.
+            }
+            catch (ObjectDisposedException)
+            {
+                // Bộ đếm đã bị hủy và giải phóng khi người chơi kết nối lại.
             }
             catch (Exception ex)
             {
-                Log("Reconnect expiry error: " + ex.Message);
+                Log("Lỗi hết hạn kết nối lại: " + ex.Message);
             }
         }
+
+        private void RemovePendingChallenges(string playerName)
+        {
+            foreach (KeyValuePair<string, string> pair in pendingChallenges)
+            {
+                if (string.Equals(pair.Key, playerName, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(pair.Value, playerName, StringComparison.OrdinalIgnoreCase))
+                {
+                    pendingChallenges.TryRemove(pair.Key, out _);
+                }
+            }
+        }
+
+        // ==========================================
+        // TRẠNG THÁI PHÒNG / DANH SÁCH
+        // ==========================================
 
         private async Task SendRoomSnapshotAsync(ServerSession session, GameRoom room, CancellationToken token)
         {
@@ -865,6 +1105,10 @@ namespace CaroOnline.Server
             {
                 room.SyncLock.Release();
             }
+
+            // Báo cho người nhận biết họ là người chơi nào hay khán giả
+            snapshot.YourPlayerIndex = session.PlayerIndex ?? -1;
+            snapshot.IsSpectator = session.IsSpectator;
             await SendToSessionAsync(session, snapshot, token);
         }
 
@@ -893,9 +1137,14 @@ namespace CaroOnline.Server
                 .ToList();
             Message message = new() { Type = "PLAYER_LIST", Players = players };
             if (recipient == null)
+            {
                 await BroadcastToSessionsAsync(activeSessions.Values.ToList(), message, token);
+                PublishState();
+            }
             else
+            {
                 await SendToSessionAsync(recipient, message, token);
+            }
         }
 
         private async Task BroadcastPlayerListAsync(CancellationToken token)
@@ -918,10 +1167,68 @@ namespace CaroOnline.Server
                 .ToList();
             Message message = new() { Type = "ROOM_LIST", Rooms = roomSummaries };
             if (recipient == null)
+            {
                 await BroadcastToSessionsAsync(activeSessions.Values.ToList(), message, token);
+                PublishState();
+            }
             else
+            {
                 await SendToSessionAsync(recipient, message, token);
+            }
         }
+
+        // Báo cho giao diện Server: danh sách Client và số phòng
+        private void PublishState()
+        {
+            try
+            {
+                ClientListChanged?.Invoke(BuildClientList());
+                RoomCountChanged?.Invoke(rooms.Count);
+            }
+            catch
+            {
+                // Lỗi ở phía giao diện không được làm hỏng luồng mạng.
+            }
+        }
+
+        private string[] BuildClientList()
+        {
+            return sessionsByName.Values
+                .OrderBy(session => session.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(DescribeSession)
+                .ToArray();
+        }
+
+        private static string DescribeSession(ServerSession session)
+        {
+            string location;
+            if (string.IsNullOrEmpty(session.RoomId))
+                location = "Sảnh chờ";
+            else if (session.IsSpectator)
+                location = $"Phòng {session.RoomId} (khán giả)";
+            else
+                location = $"Phòng {session.RoomId} (Người chơi {(session.PlayerIndex ?? 0) + 1})";
+
+            TcpClient? client = session.Client;
+            if (client == null)
+                return $"{session.Name} | Chờ kết nối lại | {location}";
+
+            string address = "Unknown";
+            try
+            {
+                address = client.Client.RemoteEndPoint?.ToString() ?? "Unknown";
+            }
+            catch
+            {
+                // Socket đã đóng.
+            }
+
+            return $"{session.Name} | {address} | {location}";
+        }
+
+        // ==========================================
+        // GỬI DỮ LIỆU
+        // ==========================================
 
         private Task BroadcastRoomAsync(GameRoom room, Message message, CancellationToken token)
         {
@@ -972,11 +1279,19 @@ namespace CaroOnline.Server
             }
             catch (IOException)
             {
-                // Connection cleanup is handled by the receive loop.
+                // Việc dọn dẹp kết nối do vòng lặp nhận xử lý.
             }
             catch (SocketException)
             {
-                // Connection cleanup is handled by the receive loop.
+                // Việc dọn dẹp kết nối do vòng lặp nhận xử lý.
+            }
+            catch (ObjectDisposedException)
+            {
+                // Kết nối đã bị đóng.
+            }
+            catch (InvalidOperationException)
+            {
+                // Kết nối đã bị đóng.
             }
             finally
             {
@@ -1052,6 +1367,10 @@ namespace CaroOnline.Server
                 name.All(character => char.IsLetterOrDigit(character) || character is ' ' or '_' or '-');
         }
 
+        // ==========================================
+        // LỊCH SỬ TRẬN ĐẤU
+        // ==========================================
+
         private async Task SaveMatchHistoryAsync(MatchHistoryRecord record, CancellationToken token)
         {
             await historyLock.WaitAsync(token);
@@ -1066,33 +1385,17 @@ namespace CaroOnline.Server
                     : new List<MatchHistoryRecord>();
                 records.Add(record);
                 string temporaryPath = path + ".tmp";
-                await File.WriteAllTextAsync(temporaryPath, JsonSerializer.Serialize(records, new JsonSerializerOptions { WriteIndented = true }), token);
+                await File.WriteAllTextAsync(temporaryPath, JsonSerializer.Serialize(records, HistoryWriteOptions), token);
                 File.Move(temporaryPath, path, true);
             }
             catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
             {
-                Log("Unable to persist match history: " + ex.Message);
+                Log("Không thể lưu lịch sử trận đấu: " + ex.Message);
             }
             finally
             {
                 historyLock.Release();
             }
-        }
-
-        public void StopServer()
-        {
-            if (!IsRunning)
-                return;
-            IsRunning = false;
-            serverCancellation?.Cancel();
-            listener?.Stop();
-            foreach (TcpClient client in clients.Values)
-                client.Close();
-            clients.Clear();
-            foreach (GameRoom room in rooms.Values)
-                room.TurnTimer?.Cancel();
-            ClientCountChanged?.Invoke(0);
-            Log("Server stopped.");
         }
 
         private void Log(string text)
