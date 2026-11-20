@@ -18,14 +18,34 @@ namespace CaroOnline.Winforms
         private static readonly Color Cyan = ColorTranslator.FromHtml("#38BDF8");
         private static readonly Color Coral = ColorTranslator.FromHtml("#F87171");
         private static readonly Color Green = ColorTranslator.FromHtml("#34D399");
+        private static readonly Color Amber = ColorTranslator.FromHtml("#FACC15");
 
         private readonly ChessBoardManager ChessBoard;
+
+        // SocketManager DÙNG CHUNG với FormLobby (không tự tạo, không tự đóng)
         private readonly SocketManager socketManager;
+
+        // Trạng thái trận (do server quyết định)
+        private bool isSpectator;
+        private int myIndex = -1;
+        private string roomId = string.Empty;
+        private string playerOneName = "PLAYER 1";
+        private string playerTwoName = "PLAYER 2";
         private bool isGameEnded;
+        private bool isPaused;
+        private bool connectionLost;
+        private bool boardLocked;
         private bool isLeavingRoom;
-        private readonly bool isSpectator;
+        private bool leaveRequested;
+        private int timerMaxSeconds;
+
         private RoundedPanel? mainSurface;
+        private Label? roomTitleLabel;
+        private Label? roomInfoLabel;
+        private Label? roleLabel;
         private Label? headerStatus;
+        private Label? playerOneNameLabel;
+        private Label? playerTwoNameLabel;
         private Label? playerOneStatus;
         private Label? playerTwoStatus;
         private Panel? activePlayerUnderline;
@@ -34,42 +54,326 @@ namespace CaroOnline.Winforms
         private Label? lastMoveLabel;
         private Label? lastMoveTurnLabel;
         private Label? matchMessageLabel;
+        private Label? timerHintLabel;
         private CircularTimerControl? circularTimer;
         private CyberButton? undoButton;
+        private CyberButton? surrenderButton;
 
-        public FormInMatch(bool isSpectator = false)
+        public FormInMatch(SocketManager socketManager, Message initialState)
         {
             InitializeComponent();
             DoubleBuffered = true;
-            this.isSpectator = isSpectator;
-            socketManager = new SocketManager();
-            ChessBoard = new ChessBoardManager(pnlChessBoard, txbPlayerName, pctbMark, 15, 15, true);
-            ChessBoard.EndeGame += ChessBoard_EndeGame;
-            ChessBoard.PlayerMarked += ChessBoard_PlayerMarked;
 
-            prcbCoolDown.Step = Cons.COOL_DOWN_STEP;
-            prcbCoolDown.Maximum = 30_000;
-            prcbCoolDown.Value = 0;
-            tmCoolDown.Interval = Cons.COOL_DOWN_INTERVAL;
+            this.socketManager = socketManager;
+
+            ChessBoard = new ChessBoardManager(pnlChessBoard, txbPlayerName, pctbMark, 15, 15, true);
+            ChessBoard.IsOnlineMode = true;
+            ChessBoard.CanMakeOnlineMove = false;
+            ChessBoard.OnlineMoveRequested += ChessBoard_OnlineMoveRequested;
+            ChessBoard.EndeGame += ChessBoard_EndeGame;
+
+            // Đồng hồ lượt do SERVER điều khiển (TURN_TIMER), không dùng timer cục bộ
+            tmCoolDown.Stop();
 
             BuildMatchUI();
-            NewGame();
-            if (isSpectator)
-            {
-                pnlChessBoard.Enabled = false;
-                if (headerStatus != null)
-                {
-                    headerStatus.Text = "Khán giả";
-                    headerStatus.ForeColor = Cyan;
-                }
-                if (matchMessageLabel != null)
-                    matchMessageLabel.Text = "Bạn đang xem trận đấu với tư cách khán giả.";
-            }
+
+            // Trạng thái đầu tiên lấy từ ROOM_STATE mà FormLobby đã nhận
+            ApplyRoomState(initialState);
+
+            socketManager.RoomStateReceived += OnRoomState;
+            socketManager.MoveReceived += OnMove;
+            socketManager.TurnChanged += OnTurn;
+            socketManager.TurnTimerTick += OnTurnTimer;
+            socketManager.GameOver += OnGameOver;
+            socketManager.PlayerDisconnected += OnPlayerDisconnected;
+            socketManager.PlayerReconnected += OnPlayerReconnected;
+            socketManager.ErrorReceived += OnError;
+            socketManager.Disconnected += OnDisconnected;
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            // SocketManager sống lâu hơn form này nên phải hủy đăng ký sự kiện
+            socketManager.RoomStateReceived -= OnRoomState;
+            socketManager.MoveReceived -= OnMove;
+            socketManager.TurnChanged -= OnTurn;
+            socketManager.TurnTimerTick -= OnTurnTimer;
+            socketManager.GameOver -= OnGameOver;
+            socketManager.PlayerDisconnected -= OnPlayerDisconnected;
+            socketManager.PlayerReconnected -= OnPlayerReconnected;
+            socketManager.ErrorReceived -= OnError;
+            socketManager.Disconnected -= OnDisconnected;
+
+            base.OnFormClosed(e);
+        }
+
+        // ==========================================
+        // NHẬN DỮ LIỆU TỪ SERVER
+        // ==========================================
+
+        // ROOM_STATE: vào phòng, kết nối lại, sau UNDO / NEW_GAME, khán giả vào xem...
+        private void OnRoomState(Message state)
+        {
+            if (IsDisposed || isGameEnded)
+                return;
+
+            ApplyRoomState(state);
+        }
+
+        private void ApplyRoomState(Message state)
+        {
+            myIndex = state.YourPlayerIndex;
+            isSpectator = state.IsSpectator;
+            roomId = state.RoomId ?? string.Empty;
+            playerOneName = string.IsNullOrWhiteSpace(state.Name) ? "PLAYER 1" : state.Name;
+            playerTwoName = string.IsNullOrWhiteSpace(state.TargetName) ? "PLAYER 2" : state.TargetName;
+            isPaused = string.Equals(state.Data, "PAUSED", StringComparison.OrdinalIgnoreCase);
+            boardLocked = false;
+            connectionLost = false;
+
+            // Vẽ lại bàn cờ rồi đặt toàn bộ quân theo bản chụp của server
+            ChessBoard.NewGame();
             ChessBoard.SetCellSize(30);
-            if (!isSpectator)
-                tmCoolDown.Start();
+
+            if (state.Board is { Length: > 0 } board)
+                ChessBoard.ApplyRemoteSnapshot(board, state.PlayerIndex);
+            else
+                ChessBoard.CurrentPlayer = state.PlayerIndex is 0 or 1 ? state.PlayerIndex : 0;
+
+            string shortRoom = roomId.ToUpperInvariant();
+            if (roomTitleLabel != null)
+                roomTitleLabel.Text = $"PHÒNG {shortRoom}";
+            if (roomInfoLabel != null)
+                roomInfoLabel.Text = $"Phòng {shortRoom}";
+            if (roleLabel != null)
+            {
+                roleLabel.Text = isSpectator
+                    ? "Khán giả"
+                    : $"Bạn là {(myIndex == 0 ? "X" : "O")}\n{NameOf(myIndex)}";
+            }
+
+            if (isSpectator)
+                SetMessage("Bạn đang xem trận đấu với tư cách khán giả.");
+            else if (isPaused)
+                SetMessage("Đối thủ đang mất kết nối. Ván đấu tạm dừng.");
+            else if (ChessBoard.MoveCount == 0)
+                SetMessage($"Ván mới bắt đầu. {playerOneName} (X) đi trước.");
+            else
+                SetMessage("Đã đồng bộ trạng thái ván đấu.");
+
+            RefreshInteractivity();
             UpdateMatchUI();
         }
+
+        // MOVE: server gửi cho CẢ HAI người chơi và khán giả, kể cả người vừa đánh
+        private void OnMove(Message move)
+        {
+            if (IsDisposed || isGameEnded)
+                return;
+
+            Point point = new(move.X, move.Y);
+
+            ChessBoard.ApplyRemoteMove(point, move.PlayerIndex);
+
+            SetMessage($"{NameOf(move.PlayerIndex)} vừa đi tại {FormatCoordinate(point)}.");
+            RefreshInteractivity();
+            UpdateMatchUI();
+        }
+
+        // TURN: lượt chơi tiếp theo
+        private void OnTurn(Message turn)
+        {
+            if (IsDisposed || isGameEnded)
+                return;
+
+            ChessBoard.CurrentPlayer = turn.PlayerIndex is 0 or 1 ? turn.PlayerIndex : 0;
+
+            if (!isSpectator)
+            {
+                SetMessage(ChessBoard.CurrentPlayer == myIndex
+                    ? "Đến lượt bạn. Hãy chọn nước đi."
+                    : $"Đang chờ {NameOf(ChessBoard.CurrentPlayer)} đi...");
+            }
+
+            RefreshInteractivity();
+            UpdateMatchUI();
+        }
+
+        // TURN_TIMER: mỗi giây server gửi số giây còn lại trong Data
+        private void OnTurnTimer(Message tick)
+        {
+            if (IsDisposed || isGameEnded)
+                return;
+
+            if (!int.TryParse(tick.Data, out int remaining))
+                return;
+
+            timerMaxSeconds = Math.Max(timerMaxSeconds, remaining + 1);
+
+            if (circularTimer != null)
+            {
+                circularTimer.Maximum = timerMaxSeconds * 1000;
+                circularTimer.Value = Math.Clamp((timerMaxSeconds - remaining) * 1000, 0, circularTimer.Maximum);
+                circularTimer.Invalidate();
+            }
+        }
+
+        // GAME_OVER: server quyết định thắng / thua / hòa. Phòng đã bị đóng sau khi gửi.
+        private void OnGameOver(Message over)
+        {
+            if (IsDisposed || isGameEnded)
+                return;
+
+            isGameEnded = true;
+            boardLocked = true;
+            ChessBoard.CanMakeOnlineMove = false;
+
+            string result = string.IsNullOrWhiteSpace(over.Result) ? over.Data ?? string.Empty : over.Result;
+            string text = BuildResultText(result);
+
+            SetMessage(text.Replace("\n", " "));
+            RefreshInteractivity();
+            UpdateMatchUI();
+
+            MessageBox.Show(this, text, "Trận đấu kết thúc", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+            // Phòng đã đóng trên server, quay về sảnh
+            isLeavingRoom = true;
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+
+        private void OnPlayerDisconnected(Message info)
+        {
+            if (IsDisposed || isGameEnded)
+                return;
+
+            isPaused = true;
+            string seconds = string.IsNullOrWhiteSpace(info.Data) ? string.Empty : $" Chờ kết nối lại tối đa {info.Data} giây.";
+            SetMessage($"{info.Name} mất kết nối.{seconds}");
+            RefreshInteractivity();
+            UpdateMatchUI();
+        }
+
+        private void OnPlayerReconnected(Message info)
+        {
+            if (IsDisposed || isGameEnded)
+                return;
+
+            isPaused = false;
+            SetMessage($"{info.Name} đã kết nối lại. Ván đấu tiếp tục.");
+            RefreshInteractivity();
+            UpdateMatchUI();
+        }
+
+        private void OnError(string code, string text)
+        {
+            if (IsDisposed || isGameEnded)
+                return;
+
+            SetMessage(string.IsNullOrWhiteSpace(text) ? "Lỗi từ server." : text);
+
+            // Nước đi bị từ chối: mở khóa lại để thử nước khác
+            RefreshInteractivity();
+        }
+
+        private void OnDisconnected(string? reason)
+        {
+            if (IsDisposed || isGameEnded)
+                return;
+
+            connectionLost = true;
+            SetMessage("Mất kết nối server. Đang thử kết nối lại...");
+            RefreshInteractivity();
+            UpdateMatchUI();
+        }
+
+        // ==========================================
+        // GỬI LÊN SERVER
+        // ==========================================
+
+        // Người chơi bấm vào một ô: gửi nước đi, server kiểm tra rồi phát MOVE cho cả phòng
+        private async void ChessBoard_OnlineMoveRequested(Point point, int playerIndex)
+        {
+            if (isSpectator || isGameEnded || !socketManager.IsConnected)
+                return;
+
+            // Khóa ngay để không gửi trùng khi bấm nhanh; sẽ mở lại khi có TURN / lỗi
+            ChessBoard.CanMakeOnlineMove = false;
+
+            try
+            {
+                await socketManager.SendMoveAsync(point.X, point.Y);
+            }
+            catch (Exception ex)
+            {
+                SetMessage("Không gửi được nước đi: " + ex.Message);
+                RefreshInteractivity();
+            }
+        }
+
+        private async void UndoMove()
+        {
+            if (isSpectator || isGameEnded || isPaused || connectionLost || !socketManager.IsConnected)
+                return;
+
+            try
+            {
+                // Server chỉ cho người vừa đi nước cuối được đi lại
+                await socketManager.UndoAsync();
+            }
+            catch (Exception ex)
+            {
+                SetMessage("Không gửi được yêu cầu đi lại: " + ex.Message);
+            }
+        }
+
+        private void Surrender()
+        {
+            RequestLeave("Đầu hàng", "Đầu hàng sẽ bị xử thua. Bạn có chắc chắn không?");
+        }
+
+        private void LeaveRoomToLobby()
+        {
+            RequestLeave("Rời phòng", "Rời phòng lúc này sẽ bị xử thua. Bạn có chắc chắn không?");
+        }
+
+        private async void RequestLeave(string caption, string confirmText)
+        {
+            // Khán giả, ván đã xong hoặc mất kết nối: thoát thẳng về sảnh
+            if (isSpectator || isGameEnded || !socketManager.IsConnected)
+            {
+                isLeavingRoom = true;
+                DialogResult = DialogResult.Cancel;
+                Close();
+                return;
+            }
+
+            if (leaveRequested)
+                return;
+
+            if (MessageBox.Show(this, confirmText, caption, MessageBoxButtons.YesNo, MessageBoxIcon.Warning)
+                != DialogResult.Yes)
+                return;
+
+            leaveRequested = true;
+            SetMessage("Đang rời phòng...");
+
+            try
+            {
+                // Server xử đối thủ thắng và gửi GAME_OVER, OnGameOver sẽ đóng form
+                await socketManager.LeaveRoomAsync();
+            }
+            catch (Exception ex)
+            {
+                leaveRequested = false;
+                SetMessage("Không rời được phòng: " + ex.Message);
+            }
+        }
+
+        // ==========================================
+        // GIAO DIỆN
+        // ==========================================
 
         private void BuildMatchUI()
         {
@@ -87,8 +391,8 @@ namespace CaroOnline.Winforms
 
             var step = MakeLabel("03", new Font("Segoe UI", 12F, FontStyle.Bold), Cyan,
                 new Point(24, 15), new Size(32, 24), ContentAlignment.MiddleLeft);
-            var title = MakeLabel("PHÒNG 01", new Font("Segoe UI", 20F, FontStyle.Bold), White,
-                new Point(60, 8), new Size(235, 40), ContentAlignment.MiddleLeft);
+            roomTitleLabel = MakeLabel("PHÒNG", new Font("Segoe UI", 20F, FontStyle.Bold), White,
+                new Point(60, 8), new Size(300, 40), ContentAlignment.MiddleLeft);
             headerStatus = MakeLabel("Đang thi đấu", new Font("Segoe UI", 10F, FontStyle.Bold), Green,
                 new Point(914, 15), new Size(130, 24), ContentAlignment.MiddleRight);
             var onlineDot = new StatusDotControl(Green) { Location = new Point(897, 22), Size = new Size(8, 8) };
@@ -97,10 +401,10 @@ namespace CaroOnline.Winforms
             close.Cursor = Cursors.Hand;
             close.Click += (_, _) => Close();
             step.MouseDown += DragWindow;
-            title.MouseDown += DragWindow;
+            roomTitleLabel.MouseDown += DragWindow;
             surface.MouseDown += DragWindow;
             surface.Controls.Add(step);
-            surface.Controls.Add(title);
+            surface.Controls.Add(roomTitleLabel);
             surface.Controls.Add(headerStatus);
             surface.Controls.Add(onlineDot);
             surface.Controls.Add(close);
@@ -136,15 +440,19 @@ namespace CaroOnline.Winforms
                 Size = new Size(48, 48)
             };
             banner.Controls.Add(xMark);
-            banner.Controls.Add(MakeLabel("PLAYER 1", new Font("Segoe UI", 13F, FontStyle.Bold), White,
-                new Point(82, 12), new Size(290, 24), ContentAlignment.MiddleLeft));
-            playerOneStatus = MakeLabel("Đến lượt của bạn", new Font("Segoe UI", 9.5F), Cyan,
+            playerOneNameLabel = MakeLabel("PLAYER 1", new Font("Segoe UI", 13F, FontStyle.Bold), White,
+                new Point(82, 12), new Size(290, 24), ContentAlignment.MiddleLeft);
+            playerOneNameLabel.AutoEllipsis = true;
+            banner.Controls.Add(playerOneNameLabel);
+            playerOneStatus = MakeLabel("Đang chờ", new Font("Segoe UI", 9.5F), Cyan,
                 new Point(82, 38), new Size(290, 20), ContentAlignment.MiddleLeft);
             banner.Controls.Add(playerOneStatus);
             banner.Controls.Add(MakeLabel("VS", new Font("Segoe UI", 12F, FontStyle.Bold), Subtle,
                 new Point(475, 24), new Size(78, 24), ContentAlignment.MiddleCenter));
-            banner.Controls.Add(MakeLabel("PLAYER 2", new Font("Segoe UI", 13F, FontStyle.Bold), White,
-                new Point(656, 12), new Size(288, 24), ContentAlignment.MiddleRight));
+            playerTwoNameLabel = MakeLabel("PLAYER 2", new Font("Segoe UI", 13F, FontStyle.Bold), White,
+                new Point(656, 12), new Size(288, 24), ContentAlignment.MiddleRight);
+            playerTwoNameLabel.AutoEllipsis = true;
+            banner.Controls.Add(playerTwoNameLabel);
             playerTwoStatus = MakeLabel("Đang chờ", new Font("Segoe UI", 9.5F), Subtle,
                 new Point(656, 38), new Size(288, 20), ContentAlignment.MiddleRight);
             banner.Controls.Add(playerTwoStatus);
@@ -165,8 +473,9 @@ namespace CaroOnline.Winforms
             surface.Controls.Add(card);
             card.Controls.Add(MakeLabel("THÔNG TIN", new Font("Segoe UI", 8.5F, FontStyle.Bold), Subtle,
                 new Point(12, 12), new Size(140, 18), ContentAlignment.MiddleLeft));
-            card.Controls.Add(MakeLabel("Phòng 01", new Font("Segoe UI", 11F, FontStyle.Bold), White,
-                new Point(12, 39), new Size(140, 22), ContentAlignment.MiddleLeft));
+            roomInfoLabel = MakeLabel("Phòng", new Font("Segoe UI", 11F, FontStyle.Bold), White,
+                new Point(12, 39), new Size(140, 22), ContentAlignment.MiddleLeft);
+            card.Controls.Add(roomInfoLabel);
             card.Controls.Add(MakeLabel("Cờ Caro", new Font("Segoe UI", 9.5F), Muted,
                 new Point(12, 64), new Size(140, 19), ContentAlignment.MiddleLeft));
             card.Controls.Add(MakeLabel("15 × 15", new Font("Segoe UI", 9.5F), Muted,
@@ -177,22 +486,11 @@ namespace CaroOnline.Winforms
             card.Controls.Add(MakeLabel("5 quân liên\ntiếp để thắng", new Font("Segoe UI", 9F), Muted,
                 new Point(12, 151), new Size(140, 38), ContentAlignment.MiddleLeft));
             AddDivider(card, 201);
-            card.Controls.Add(MakeLabel("Khán giả", new Font("Segoe UI", 10F, FontStyle.Bold), White,
+            card.Controls.Add(MakeLabel("Vai trò", new Font("Segoe UI", 10F, FontStyle.Bold), White,
                 new Point(12, 214), new Size(140, 20), ContentAlignment.MiddleLeft));
-            card.Controls.Add(MakeLabel("04 đang xem", new Font("Segoe UI", 9F), Subtle,
-                new Point(12, 238), new Size(140, 18), ContentAlignment.MiddleLeft));
-
-            string[] spectators = { "Minh Anh", "Player 5", "Hải Đăng", "Player 8" };
-            for (int i = 0; i < spectators.Length; i++)
-                card.Controls.Add(new SpectatorRow(spectators[i])
-                {
-                    Location = new Point(8, 264 + i * 36),
-                    Size = new Size(148, 29),
-                    BackColor = CardColor
-                });
-
-            card.Controls.Add(MakeLabel("Công khai", new Font("Segoe UI", 9F), Subtle,
-                new Point(12, 509), new Size(140, 20), ContentAlignment.MiddleLeft));
+            roleLabel = MakeLabel("—", new Font("Segoe UI", 9.5F), Cyan,
+                new Point(12, 238), new Size(140, 40), ContentAlignment.TopLeft);
+            card.Controls.Add(roleLabel);
         }
 
         private void BuildBoardCard(RoundedPanel surface)
@@ -240,21 +538,22 @@ namespace CaroOnline.Winforms
                 Location = new Point(43, 55),
                 Size = new Size(130, 130),
                 BackColor = card.BackColor,
-                Maximum = prcbCoolDown.Maximum,
+                Maximum = 0,
                 Value = 0
             };
             card.Controls.Add(circularTimer);
-            card.Controls.Add(MakeLabel("Hãy chọn nước đi", new Font("Segoe UI", 9.5F), Muted,
-                new Point(14, 190), new Size(189, 24), ContentAlignment.MiddleCenter));
+            timerHintLabel = MakeLabel("Đang chờ", new Font("Segoe UI", 9.5F), Muted,
+                new Point(14, 190), new Size(189, 24), ContentAlignment.MiddleCenter);
+            card.Controls.Add(timerHintLabel);
 
             undoButton = MakeActionButton("ĐI LẠI", new Point(12, 230), new Size(193, 42),
                 ColorTranslator.FromHtml("#123447"), Cyan, ColorTranslator.FromHtml("#1B4D65"));
             undoButton.Click += (_, _) => UndoMove();
-            var surrenderButton = MakeActionButton("ĐẦU HÀNG", new Point(12, 282), new Size(193, 42),
+            surrenderButton = MakeActionButton("ĐẦU HÀNG", new Point(12, 282), new Size(193, 42),
                 ColorTranslator.FromHtml("#351A28"), Coral, ColorTranslator.FromHtml("#5C2638"));
             surrenderButton.Click += (_, _) => Surrender();
             var leaveButton = MakeActionButton("RỜI PHÒNG", new Point(12, 334), new Size(193, 42),
-                ColorTranslator.FromHtml("#3A3215"), ColorTranslator.FromHtml("#FACC15"), ColorTranslator.FromHtml("#75621B"));
+                ColorTranslator.FromHtml("#3A3215"), Amber, ColorTranslator.FromHtml("#75621B"));
             leaveButton.Click += (_, _) => LeaveRoomToLobby();
             card.Controls.Add(undoButton);
             card.Controls.Add(surrenderButton);
@@ -270,28 +569,83 @@ namespace CaroOnline.Winforms
             surface.Controls.Add(banner);
             var dot = new StatusDotControl(Green) { Location = new Point(16, 20), Size = new Size(8, 8) };
             banner.Controls.Add(dot);
-            banner.Controls.Add(MakeLabel("Trận đấu đang diễn ra", new Font("Segoe UI", 10F, FontStyle.Bold), White,
+            banner.Controls.Add(MakeLabel("Trận đấu trực tuyến", new Font("Segoe UI", 10F, FontStyle.Bold), White,
                 new Point(31, 11), new Size(360, 24), ContentAlignment.MiddleLeft));
-            banner.Controls.Add(MakeLabel("Kết nối ổn định · 24 ms", new Font("Segoe UI", 9F, FontStyle.Bold), Green,
-                new Point(780, 11), new Size(230, 22), ContentAlignment.MiddleRight));
-            matchMessageLabel = MakeLabel("Ván mới bắt đầu. PLAYER 1 đi trước.", new Font("Segoe UI", 9.5F), Muted,
+            matchMessageLabel = MakeLabel("Đang đồng bộ với server...", new Font("Segoe UI", 9.5F), Muted,
                 new Point(16, 38), new Size(990, 24), ContentAlignment.MiddleLeft);
             banner.Controls.Add(matchMessageLabel);
+        }
+
+        private string NameOf(int index) => index == 1 ? playerTwoName : playerOneName;
+
+        // "Bạn" nếu là mình, ngược lại là tên người chơi
+        private string Subject(int index) => !isSpectator && index == myIndex ? "Bạn" : NameOf(index);
+
+        private void SetMessage(string text)
+        {
+            if (matchMessageLabel != null)
+                matchMessageLabel.Text = text;
+        }
+
+        // Quyết định ai được bấm ô, nút nào sáng
+        private void RefreshInteractivity()
+        {
+            bool locked = isGameEnded || boardLocked || isPaused || connectionLost;
+            bool myTurn = !isSpectator && !locked && myIndex >= 0 && ChessBoard.CurrentPlayer == myIndex;
+
+            ChessBoard.IsOnlineMode = true;
+            ChessBoard.CanMakeOnlineMove = myTurn;
+            pnlChessBoard.Enabled = !(isSpectator || isGameEnded);
+
+            // Lượt luôn đổi qua lại, nên "chưa phải lượt mình" nghĩa là mình vừa đi nước cuối
+            bool canUndo = !isSpectator && !locked && ChessBoard.MoveCount > 0 && ChessBoard.CurrentPlayer != myIndex;
+            if (undoButton != null)
+                undoButton.Enabled = canUndo;
+            undoToolStripMenuItem.Enabled = canUndo;
+
+            if (surrenderButton != null)
+                surrenderButton.Enabled = !isSpectator && !isGameEnded && !connectionLost;
+
+            if (timerHintLabel != null)
+            {
+                timerHintLabel.Text = isSpectator ? "Bạn đang xem trận"
+                    : isGameEnded ? "Ván đã kết thúc"
+                    : isPaused || connectionLost ? "Tạm dừng"
+                    : myTurn ? "Hãy chọn nước đi"
+                    : "Đang chờ đối thủ";
+            }
+        }
+
+        private string DescribeSide(int side)
+        {
+            if (isGameEnded)
+                return "Đã kết thúc";
+            if (side != ChessBoard.CurrentPlayer)
+                return "Đang chờ";
+            if (isSpectator)
+                return "Đang suy nghĩ";
+            return side == myIndex ? "Đến lượt của bạn" : "Đối thủ đang nghĩ";
         }
 
         private void UpdateMatchUI()
         {
             int currentPlayer = ChessBoard.CurrentPlayer;
             bool playerOneActive = currentPlayer == 0;
+
+            if (playerOneNameLabel != null)
+                playerOneNameLabel.Text = playerOneName;
+            if (playerTwoNameLabel != null)
+                playerTwoNameLabel.Text = playerTwoName;
+
             if (playerOneStatus != null)
             {
-                playerOneStatus.Text = playerOneActive ? "Đến lượt của bạn" : "Đang chờ";
-                playerOneStatus.ForeColor = playerOneActive ? Cyan : Subtle;
+                playerOneStatus.Text = DescribeSide(0);
+                playerOneStatus.ForeColor = playerOneActive && !isGameEnded ? Cyan : Subtle;
             }
             if (playerTwoStatus != null)
             {
-                playerTwoStatus.Text = playerOneActive ? "Đang chờ" : "Đến lượt của bạn";
-                playerTwoStatus.ForeColor = playerOneActive ? Subtle : Coral;
+                playerTwoStatus.Text = DescribeSide(1);
+                playerTwoStatus.ForeColor = !playerOneActive && !isGameEnded ? Coral : Subtle;
             }
             if (activePlayerUnderline != null)
             {
@@ -302,7 +656,7 @@ namespace CaroOnline.Winforms
 
             if (turnLabel != null)
             {
-                turnLabel.Text = $"Lượt của PLAYER {currentPlayer + 1}";
+                turnLabel.Text = $"Lượt của {NameOf(currentPlayer)}";
                 turnLabel.ForeColor = playerOneActive ? Cyan : Coral;
             }
             if (moveCountLabel != null)
@@ -313,34 +667,83 @@ namespace CaroOnline.Winforms
                 lastMoveLabel.Text = lastMove == null ? "Nước vừa đi: --" : $"Nước vừa đi: {FormatCoordinate(lastMove.Point)}";
             if (lastMoveTurnLabel != null)
                 lastMoveTurnLabel.Text = "X đi trước";
-            if (matchMessageLabel != null && lastMove != null)
-                matchMessageLabel.Text = $"PLAYER {lastMove.currentPlayer + 1} vừa đi tại {FormatCoordinate(lastMove.Point)}. Đến lượt PLAYER {currentPlayer + 1}.";
 
-            if (undoButton != null)
-                undoButton.Enabled = ChessBoard.MoveCount > 0 && !isGameEnded;
-            undoToolStripMenuItem.Enabled = ChessBoard.MoveCount > 0 && !isGameEnded;
-            if (circularTimer != null)
+            if (headerStatus != null)
             {
-                circularTimer.Value = prcbCoolDown.Value;
-                circularTimer.Maximum = prcbCoolDown.Maximum;
-                circularTimer.Invalidate();
+                if (isGameEnded)
+                {
+                    headerStatus.Text = "Trận đấu kết thúc";
+                    headerStatus.ForeColor = Coral;
+                }
+                else if (connectionLost)
+                {
+                    headerStatus.Text = "Mất kết nối";
+                    headerStatus.ForeColor = Coral;
+                }
+                else if (isPaused)
+                {
+                    headerStatus.Text = "Tạm dừng";
+                    headerStatus.ForeColor = Amber;
+                }
+                else if (isSpectator)
+                {
+                    headerStatus.Text = "Khán giả";
+                    headerStatus.ForeColor = Cyan;
+                }
+                else
+                {
+                    headerStatus.Text = "Đang thi đấu";
+                    headerStatus.ForeColor = Green;
+                }
             }
+        }
+
+        // Nội dung thông báo kết quả từ chuỗi Result của server
+        private string BuildResultText(string result)
+        {
+            string upper = result.ToUpperInvariant();
+
+            if (upper.StartsWith("DRAW", StringComparison.Ordinal))
+                return "Ván cờ hòa!";
+
+            int winner = upper.StartsWith("PLAYER_ONE_WIN", StringComparison.Ordinal) ? 0
+                : upper.StartsWith("PLAYER_TWO_WIN", StringComparison.Ordinal) ? 1
+                : -1;
+
+            if (winner < 0)
+                return "Trận đấu đã kết thúc.";
+
+            int loser = 1 - winner;
+
+            string headline = isSpectator ? $"{NameOf(winner)} thắng!"
+                : winner == myIndex ? "Bạn đã thắng!"
+                : "Bạn đã thua.";
+
+            string reason = upper.Contains("BY_FORFEIT", StringComparison.Ordinal)
+                ? $"{Subject(loser)} đã rời phòng hoặc đầu hàng."
+                : upper.Contains("BY_TIMEOUT", StringComparison.Ordinal)
+                    ? $"{Subject(loser)} hết giờ."
+                    : upper.Contains("BY_DISCONNECT", StringComparison.Ordinal)
+                        ? $"{Subject(loser)} mất kết nối quá lâu."
+                        : string.Empty;
+
+            return reason.Length > 0 ? $"{headline}\n{reason}" : headline;
         }
 
         private static string FormatCoordinate(Point point) => $"{(char)('A' + point.X)}{point.Y + 1}";
 
         private static Label MakeLabel(string text, Font font, Color color, Point location, Size size,
             ContentAlignment alignment) => new()
-        {
-            AutoSize = false,
-            BackColor = Color.Transparent,
-            Text = text,
-            Font = font,
-            ForeColor = color,
-            Location = location,
-            Size = size,
-            TextAlign = alignment
-        };
+            {
+                AutoSize = false,
+                BackColor = Color.Transparent,
+                Text = text,
+                Font = font,
+                ForeColor = color,
+                Location = location,
+                Size = size,
+                TextAlign = alignment
+            };
 
         private static RoundedPanel MakeCard(Point location, Size size, Color background, Color border, float radius) => new()
         {
@@ -354,16 +757,16 @@ namespace CaroOnline.Winforms
 
         private static CyberButton MakeActionButton(string text, Point location, Size size, Color background,
             Color foreground, Color border) => new()
-        {
-            Text = text,
-            Location = location,
-            Size = size,
-            BackColor = background,
-            ForeColor = foreground,
-            BorderColor = border,
-            Font = new Font("Segoe UI", 10F, FontStyle.Bold),
-            Cursor = Cursors.Hand
-        };
+            {
+                Text = text,
+                Location = location,
+                Size = size,
+                BackColor = background,
+                ForeColor = foreground,
+                BorderColor = border,
+                Font = new Font("Segoe UI", 10F, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
 
         private static void AddDivider(Control parent, int y)
         {
@@ -375,175 +778,57 @@ namespace CaroOnline.Winforms
             });
         }
 
-        private void LeaveRoomToLobby()
-        {
-            isLeavingRoom = true;
-            tmCoolDown.Stop();
-            DialogResult = DialogResult.Cancel;
-            Close();
-        }
+        // ==========================================
+        // SỰ KIỆN CỦA BÀN CỜ / FORM
+        // ==========================================
 
-        private void Surrender()
-        {
-            if (isGameEnded || isSpectator) return;
-            int surrenderingPlayer = ChessBoard.CurrentPlayer + 1;
-            int winningPlayer = surrenderingPlayer == 1 ? 2 : 1;
-            EndGame(winningPlayer, $"PLAYER {surrenderingPlayer} đầu hàng.");
-        }
-
-        void EndGame(int? winningPlayer = null, string? endReason = null)
-        {
-            if (isGameEnded)
-                return;
-            isGameEnded = true;
-            tmCoolDown.Stop();
-            pnlChessBoard.Enabled = false;
-            undoToolStripMenuItem.Enabled = false;
-            UpdateUndoAvailability();
-            if (headerStatus != null)
-            {
-                headerStatus.Text = "Trận đấu kết thúc";
-                headerStatus.ForeColor = Coral;
-            }
-            UpdateMatchUI();
-            if (matchMessageLabel != null)
-                matchMessageLabel.Text = endReason == null
-                    ? "Ván đấu kết thúc · Chọn ĐI LẠI để chơi tiếp hoặc RỜI PHÒNG."
-                    : $"{endReason} PLAYER {winningPlayer} thắng.";
-
-            if (winningPlayer.HasValue)
-            {
-                int losingPlayer = winningPlayer.Value == 1 ? 2 : 1;
-                string resultMessage = endReason == null
-                    ? $"PLAYER {winningPlayer.Value} thắng!"
-                    : $"{endReason}\nPLAYER {winningPlayer.Value} thắng, PLAYER {losingPlayer} thua.";
-                DialogResult rematchChoice = MessageBox.Show(
-                    $"{resultMessage}\nBạn có muốn đấu lại không?",
-                    "Trận đấu kết thúc",
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Question);
-
-                if (rematchChoice == DialogResult.Yes)
-                    NewGame();
-                else
-                    LeaveRoomToLobby();
-            }
-        }
-
-        void NewGame()
-        {
-            StartNewGameUI();
-        }
-
-        void UndoMove()
-        {
-            UndoLastMoveUI();
-        }
-
-        void Quit()
-        {
-            socketManager.Close();
-            Application.Exit();
-        }
-
-        private void StartNewGameUI()
-        {
-            isGameEnded = false;
-            ChessBoard.IsOnlineMode = false;
-            ChessBoard.CanMakeOnlineMove = true;
-            ChessBoard.NewGame();
-            ChessBoard.SetCellSize(30);
-            pnlChessBoard.Enabled = true;
-            undoToolStripMenuItem.Enabled = false;
-            prcbCoolDown.Value = 0;
-            if (!isSpectator)
-                tmCoolDown.Start();
-            if (headerStatus != null)
-            {
-                headerStatus.Text = "Đang thi đấu";
-                headerStatus.ForeColor = Green;
-            }
-            UpdateMatchUI();
-        }
-
-        private void UndoLastMoveUI()
-        {
-            if (isGameEnded || isSpectator || !ChessBoard.Undo())
-                return;
-            tmCoolDown.Stop();
-            prcbCoolDown.Value = 0;
-            UpdateUndoAvailability();
-            UpdateMatchUI();
-        }
-
-        private void UpdateUndoAvailability()
-        {
-            bool canUndo = !isGameEnded && ChessBoard.MoveCount > 0;
-            undoToolStripMenuItem.Enabled = canUndo;
-            if (undoButton != null)
-                undoButton.Enabled = canUndo;
-        }
-
+        // Bàn cờ phát hiện 5 quân liên tiếp: chỉ khóa bàn cờ,
+        // kết quả chính thức chờ GAME_OVER từ server
         private void ChessBoard_EndeGame(object? sender, EventArgs e)
         {
-            int? winningPlayer = ChessBoard.LastMove is PlayInfo lastMove
-                ? lastMove.currentPlayer + 1
-                : null;
-            EndGame(winningPlayer);
+            boardLocked = true;
+            ChessBoard.CanMakeOnlineMove = false;
         }
 
-        private void ChessBoard_PlayerMarked(object? sender, EventArgs e)
-        {
-            prcbCoolDown.Value = 0;
-            tmCoolDown.Stop();
-            tmCoolDown.Start();
-            UpdateUndoAvailability();
-            UpdateMatchUI();
-        }
-
+        // Đồng hồ do server điều khiển, hai hàm này giữ lại vì Designer đang gắn sự kiện
         private void timer1_Tick(object sender, EventArgs e)
         {
-            if (prcbCoolDown.Value < prcbCoolDown.Maximum)
-                prcbCoolDown.PerformStep();
-            if (circularTimer != null)
-            {
-                circularTimer.Value = prcbCoolDown.Value;
-                circularTimer.Invalidate();
-            }
-            if (prcbCoolDown.Value >= prcbCoolDown.Maximum)
-            {
-                int losingPlayer = ChessBoard.CurrentPlayer + 1;
-                int winningPlayer = losingPlayer == 1 ? 2 : 1;
-                EndGame(winningPlayer, $"PLAYER {losingPlayer} hết giờ.");
-            }
         }
 
-        private void tmCoolDown_Tick(object sender, EventArgs e) => timer1_Tick(sender, e);
+        private void tmCoolDown_Tick(object sender, EventArgs e)
+        {
+        }
 
-        private void newGameToolStripMenuItem_Click(object sender, EventArgs e) => NewGame();
+        // Ván mới do server quản lý (phòng đóng khi hết ván), nên menu này không làm gì
+        private void newGameToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+        }
+
         private void undoToolStripMenuItem_Click(object sender, EventArgs e) => UndoMove();
-        private void quitToolStripMenuItem_Click(object sender, EventArgs e) => Quit();
+
+        private void quitToolStripMenuItem_Click(object sender, EventArgs e) => Close();
 
         private void Form1_FormClosing(object sender, FormClosingEventArgs e)
         {
-            if (isLeavingRoom)
-            {
-                socketManager.Close();
+            // Đã có kết quả, đang chủ động rời hoặc khán giả: đóng luôn.
+            // FormLobby sẽ gửi LEAVE_ROOM nếu vẫn còn trong phòng.
+            if (isLeavingRoom || isGameEnded || isSpectator)
                 return;
-            }
-            if (MessageBox.Show("Nhấn OK để thoát", "Thông báo", MessageBoxButtons.OKCancel) != DialogResult.OK)
+
+            if (e.CloseReason != CloseReason.UserClosing)
+                return;
+
+            if (MessageBox.Show(this, "Thoát lúc này sẽ bị xử thua. Bạn có chắc chắn không?", "Thông báo",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
             {
                 e.Cancel = true;
-                return;
             }
-            socketManager.Close();
         }
 
         protected override bool ProcessCmdKey(ref System.Windows.Forms.Message msg, Keys keyData)
         {
-            if (keyData == (Keys.Control | Keys.N)) { NewGame(); return true; }
             if (keyData == (Keys.Control | Keys.Z)) { UndoMove(); return true; }
-            if (keyData == (Keys.Control | Keys.Q)) { Quit(); return true; }
+            if (keyData == (Keys.Control | Keys.Q)) { Close(); return true; }
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
@@ -563,6 +848,10 @@ namespace CaroOnline.Winforms
         private void FormInMatch_Load(object? sender, EventArgs e)
         {
         }
+
+        // ==========================================
+        // CÁC CONTROL TỰ VẼ
+        // ==========================================
 
         private sealed class RoundedPanel : Panel
         {
@@ -641,6 +930,12 @@ namespace CaroOnline.Winforms
             {
                 base.OnMouseUp(e);
                 _pressed = false;
+                Invalidate();
+            }
+
+            protected override void OnEnabledChanged(EventArgs e)
+            {
+                base.OnEnabledChanged(e);
                 Invalidate();
             }
 
@@ -744,29 +1039,6 @@ namespace CaroOnline.Winforms
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
                 using var brush = new SolidBrush(_color);
                 e.Graphics.FillEllipse(brush, 0, 0, Math.Max(1, Width - 1), Math.Max(1, Height - 1));
-            }
-        }
-
-        private sealed class SpectatorRow : Control
-        {
-            public SpectatorRow(string name)
-            {
-                Text = name;
-                DoubleBuffered = true;
-                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
-                    ControlStyles.OptimizedDoubleBuffer, true);
-            }
-
-            protected override void OnPaintBackground(PaintEventArgs e) => e.Graphics.Clear(BackColor);
-
-            protected override void OnPaint(PaintEventArgs e)
-            {
-                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-                using var dotBrush = new SolidBrush(Green);
-                e.Graphics.FillEllipse(dotBrush, 3, (Height - 6) / 2, 6, 6);
-                using var font = new Font("Segoe UI", 8.5F);
-                TextRenderer.DrawText(e.Graphics, Text, font, new Rectangle(16, 0, Width - 18, Height), Muted,
-                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
             }
         }
 

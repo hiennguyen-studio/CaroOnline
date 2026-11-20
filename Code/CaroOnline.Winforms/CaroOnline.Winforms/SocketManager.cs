@@ -1,279 +1,248 @@
-﻿
-using System;
-using System.Collections.Concurrent;
+﻿using System;
+using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Net;
-using System.Net.NetworkInformation;
 using System.Net.Sockets;
-using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace CaroOnline.Winforms
 {
-    public class SocketManager
+    public sealed class SocketManager : IDisposable
     {
-        #region Properties
+        private static readonly JsonSerializerOptions JsonOptions = new()
+        {
+            PropertyNameCaseInsensitive = true
+        };
 
-        private static readonly ClientNetworkSettings defaultSettings = ClientNetworkSettings.Load();
+        private const int MaxFrameBytes = 65536;
 
-        private readonly ClientNetworkSettings settings = ClientNetworkSettings.Load();
+        // [SỬA 1] Thêm IP và PORT mặc định (FormLogin đang dùng)
+        private static readonly ClientNetworkSettings defaultSettings =
+            ClientNetworkSettings.Load();
 
         public static string IP = defaultSettings.ServerAddress;
 
         public static int PORT = defaultSettings.ServerPort;
 
-        private TcpListener? server;
+        private readonly SynchronizationContext? uiContext;
+        private readonly SemaphoreSlim sendLock = new(1, 1);
 
         private TcpClient? client;
-
-        private readonly ConcurrentDictionary<TcpClient, SemaphoreSlim> clientSendLocks = new();
-
-        private readonly SemaphoreSlim serverClientSendLock = new(1, 1);
-
-        private readonly ConcurrentDictionary<int, TcpClient>
-            clients = new ConcurrentDictionary<int, TcpClient>();
-
-        private int clientId = 0;
-
-        private bool isServer = false;
-
+        private NetworkStream? stream;
         private CancellationTokenSource? cancellation;
+        private int disconnectRaised;
 
-        public event Action<string>? MessageReceived;
+        // ==========================================
+        // SỰ KIỆN (luôn chạy trên luồng giao diện)
+        // ==========================================
 
-        public event Action<int>? ClientConnected;
+        public event Action<Message>? Welcomed;
+        public event Action<List<PlayerSummary>>? PlayerListReceived;
+        public event Action<List<RoomSummary>>? RoomListReceived;
 
-        public event Action<int>? ClientDisconnected;
+        // Có người thách đấu mình: tham số là tên người thách
+        public event Action<string>? ChallengeReceived;
 
-        public event Action? Disconnected;
+        // Lời thách đấu của mình bị từ chối: tham số là tên người từ chối
+        public event Action<string>? ChallengeRejected;
 
-        public bool IsConnected => client?.Connected == true;
+        // Vào phòng / cập nhật toàn bộ trạng thái phòng (người chơi lẫn khán giả)
+        public event Action<Message>? RoomStateReceived;
 
-        #endregion
+        public event Action<Message>? MoveReceived;
+        public event Action<Message>? TurnChanged;
+        public event Action<Message>? TurnTimerTick;
+        public event Action<Message>? GameOver;
+        public event Action<Message>? PlayerDisconnected;
+        public event Action<Message>? PlayerReconnected;
 
-        #region Client
+        // (errorCode, nội dung)
+        public event Action<string, string>? ErrorReceived;
+        public event Action<string>? InfoReceived;
 
-        public async Task<bool> ConnectServer() // Ket noi den Server
+        // Mất kết nối; tham số là lý do (có thể null)
+        public event Action<string?>? Disconnected;
+
+        // ==========================================
+        // TRẠNG THÁI
+        // ==========================================
+
+        public bool IsConnected => client?.Connected == true && cancellation is { IsCancellationRequested: false };
+        public string PlayerName { get; private set; } = string.Empty;
+        public string? ResumeToken { get; private set; }
+
+        // Phòng đang ở ("" nếu đang ở sảnh)
+        public string CurrentRoomId { get; private set; } = string.Empty;
+
+        // 0 hoặc 1 nếu là người chơi, -1 nếu là khán giả / ở sảnh
+        public int MyPlayerIndex { get; private set; } = -1;
+
+        public bool IsSpectator { get; private set; }
+
+        public bool IsInRoom => !string.IsNullOrEmpty(CurrentRoomId);
+
+        public SocketManager()
         {
-            return await ConnectServer(IP, PORT, Environment.UserName, string.Empty);
+            uiContext = SynchronizationContext.Current;
         }
 
-        public async Task<bool> ConnectServer(string host, int port, string playerName, string resumeToken = "")
+        // ==========================================
+        // KẾT NỐI
+        // ==========================================
+
+        // Kết nối, gửi HELLO và chờ WELCOME. Ném InvalidOperationException nếu Server từ chối.
+        public async Task<Message> ConnectAsync(
+            string host,
+            int port,
+            string playerName,
+            string? resumeToken = null,
+            CancellationToken token = default)
         {
+            Disconnect();
+
+            TcpClient tcp = new() { NoDelay = true };
+            CancellationTokenSource cts = new();
+
             try
             {
-                if (string.IsNullOrWhiteSpace(host) || port is < 1 or > 65535)
-                    return false;
+                await tcp.ConnectAsync(host, port, token);
 
-                TcpClient connectedClient = new();
-                using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(settings.ConnectTimeoutSeconds));
-                await connectedClient.ConnectAsync(host, port, timeout.Token);
-                client?.Close();
-                client = connectedClient;
+                client = tcp;
+                stream = tcp.GetStream();
+                cancellation = cts;
+                disconnectRaised = 0;
+                PlayerName = playerName;
+
+                // [SỬA 2] Lưu lại IP/PORT vừa kết nối thành công
                 IP = host;
                 PORT = port;
 
-                isServer = false;
+                ResetRoomState();
 
-                _ = ReceiveClientLoop(connectedClient);
-
-                await Send(JsonSerializer.Serialize(new Message
+                await SendAsync(new Message
                 {
                     Type = "HELLO",
                     Name = playerName,
                     ResumeToken = resumeToken
-                }));
+                }, token);
 
-                return true;
+                using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+                timeout.CancelAfter(TimeSpan.FromSeconds(10));
+
+                Message? reply = await ReadFrameAsync(stream, timeout.Token);
+
+                if (reply == null)
+                    throw new InvalidOperationException("Server đã đóng kết nối.");
+
+                if (!string.Equals(reply.Type, "WELCOME", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException(reply.Data ?? reply.ErrorCode ?? "Server từ chối kết nối.");
+
+                ResumeToken = reply.ResumeToken;
+                ApplyWelcome(reply);
+
+                _ = ReceiveLoopAsync(tcp, stream, cts);
+
+                Raise(() => Welcomed?.Invoke(reply));
+                return reply;
             }
-            catch (Exception ex)
+            catch
             {
-                Console.WriteLine("Loi ket noi: " + ex.Message);
-
-                return false;
+                cts.Cancel();
+                cts.Dispose();
+                tcp.Close();
+                client = null;
+                stream = null;
+                cancellation = null;
+                throw;
             }
         }
 
-        private async Task ReceiveClientLoop(TcpClient connectedClient) // Nhan du lieu tu Server
+        public void Disconnect()
         {
+            Interlocked.Exchange(ref disconnectRaised, 1);
+
+            try { cancellation?.Cancel(); } catch { }
+            try { client?.Close(); } catch { }
+
+            client = null;
+            stream = null;
+            cancellation = null;
+            ResetRoomState();
+        }
+
+        // [SỬA 3] Giữ lại tên Close() để FormInMatch vẫn gọi được
+        public void Close() => Disconnect();
+
+        public void Dispose()
+        {
+            Disconnect();
+            sendLock.Dispose();
+        }
+
+        // ==========================================
+        // LỆNH GỬI LÊN SERVER
+        // ==========================================
+
+        public Task RequestPlayersAsync() => SendAsync(new Message { Type = "GET_PLAYERS" });
+
+        public Task RequestRoomsAsync() => SendAsync(new Message { Type = "GET_ROOMS" });
+
+        public Task ChallengeAsync(string targetName) =>
+            SendAsync(new Message { Type = "CHALLENGE", TargetName = targetName });
+
+        // challengerName: tên người đã thách mình
+        public Task AcceptChallengeAsync(string challengerName) =>
+            SendAsync(new Message { Type = "CHALLENGE_ACCEPT", TargetName = challengerName });
+
+        public Task RejectChallengeAsync(string challengerName) =>
+            SendAsync(new Message { Type = "CHALLENGE_REJECT", TargetName = challengerName });
+
+        // Vào xem trận với tư cách khán giả
+        public Task JoinSpectatorAsync(string roomId) =>
+            SendAsync(new Message { Type = "JOIN_SPECTATOR", RoomId = roomId });
+
+        public async Task LeaveRoomAsync()
+        {
+            bool wasSpectator = IsSpectator;
+
+            await SendAsync(new Message { Type = "LEAVE_ROOM" });
+
+            // Server không báo lại cho khán giả vừa rời, nên tự xóa trạng thái phòng
+            if (wasSpectator)
+                ResetRoomState();
+        }
+
+        public Task SendMoveAsync(int x, int y) =>
+            SendAsync(new Message { Type = "MOVE", X = x, Y = y });
+
+        public Task UndoAsync() => SendAsync(new Message { Type = "UNDO" });
+
+        public Task NewGameAsync() => SendAsync(new Message { Type = "NEW_GAME" });
+
+        public Task PingAsync() => SendAsync(new Message { Type = "PING" });
+
+        public async Task SendAsync(Message message, CancellationToken token = default)
+        {
+            NetworkStream? currentStream = stream;
+
+            if (currentStream == null)
+                throw new InvalidOperationException("Chưa kết nối tới Server.");
+
+            byte[] payload = JsonSerializer.SerializeToUtf8Bytes(message, JsonOptions);
+
+            if (payload.Length > MaxFrameBytes)
+                throw new InvalidDataException("Tin nhắn vượt quá giới hạn kích thước.");
+
+            byte[] header = BitConverter.GetBytes(IPAddress.HostToNetworkOrder(payload.Length));
+
+            await sendLock.WaitAsync(token);
             try
             {
-                while (ReferenceEquals(client, connectedClient) && connectedClient.Connected)
-                {
-                    string? message = await ReceiveData(connectedClient);
-
-                    if (message == null)
-                        break;
-
-                    MessageReceived?.Invoke(message);
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Loi nhan du lieu: " + ex.Message);
-            }
-            finally
-            {
-                if (ReferenceEquals(client, connectedClient))
-                {
-                    client = null;
-                    connectedClient.Close();
-                    Disconnected?.Invoke();
-                }
-            }
-        }
-
-        #endregion
-
-        #region Server
-
-        public async Task CreateServer() // Khoi dong Server
-        {
-            try
-            {
-                isServer = true;
-
-                cancellation = new CancellationTokenSource();
-
-                server = new TcpListener(IPAddress.Any, PORT);
-
-                server.Start();
-
-                Console.WriteLine("Server dang chay tai port " + PORT);
-
-                while (!cancellation.Token.IsCancellationRequested)
-                {
-                    TcpClient newClient = await server.AcceptTcpClientAsync(
-                        cancellation.Token
-                    );
-
-                    int id = Interlocked.Increment(ref clientId);
-
-                    clients.TryAdd(id, newClient);
-
-                    ClientConnected?.Invoke(id);
-
-                    _ = ReceiveServerLoop(id, newClient);
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                // Server da dung
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Loi Server: " + ex.Message);
-            }
-        }
-
-        private async Task ReceiveServerLoop(int id, TcpClient client) // Nhan du lieu tu Client
-        {
-            try
-            {
-                while (client.Connected)
-                {
-                    string? message = await ReceiveData(client);
-
-                    if (message == null)
-                        break;
-
-                    MessageReceived?.Invoke(message);
-
-                    
-                    await SendToAll(message); // Chuyen tiep thong diep den cac Client
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Loi Client: " + ex.Message);
-            }
-            finally
-            {
-                clients.TryRemove(id, out _);
-
-                client.Close();
-
-                ClientDisconnected?.Invoke(id);
-            }
-        }
-
-        public async Task SendToAll(string message) // Gui du lieu den tat ca Client
-        {
-            foreach (var item in clients.ToArray())
-            {
-                try
-                {
-                    await SendData(item.Value, message);
-                }
-                catch
-                {
-                    // Bo qua Client bi mat ket noi
-                }
-            }
-        }
-
-        public void StopServer() // Dung Server
-        {
-            cancellation?.Cancel();
-
-            server?.Stop();
-
-            foreach (var item in clients)
-            {
-                item.Value.Close();
-            }
-
-            clients.Clear();
-        }
-
-        #endregion
-
-        #region Both
-
-        public async Task Send(string message) // Gui du lieu
-        {
-            if (isServer)
-            {
-                await SendToAll(message);
-            }
-            else if (client != null && client.Connected)
-            {
-                await SendData(client, message);
-            }
-        }
-
-        public string SerializeData<T>(T data) // Gui du lieu theo dinh dang JSON
-        {
-            return JsonSerializer.Serialize(data);
-        }
-
-        public T? DeserializeData<T>(string data) // Giai ma du lieu JSON
-        {
-            return JsonSerializer.Deserialize<T>(data);
-        }
-
-        private async Task SendData(TcpClient target, string message)
-        {
-            byte[] data = Encoding.UTF8.GetBytes(message);
-
-            if (data.Length > settings.MaxFrameBytes)
-                throw new InvalidDataException("Message exceeds the configured frame limit.");
-
-            byte[] length = BitConverter.GetBytes(
-                IPAddress.HostToNetworkOrder(data.Length)
-            );
-
-            NetworkStream stream = target.GetStream();
-            SemaphoreSlim sendLock = clientSendLocks.GetOrAdd(target, _ => new SemaphoreSlim(1, 1));
-            await sendLock.WaitAsync();
-            try
-            {
-                await stream.WriteAsync(length);
-                await stream.WriteAsync(data);
-                await stream.FlushAsync();
+                await currentStream.WriteAsync(header, token);
+                await currentStream.WriteAsync(payload, token);
+                await currentStream.FlushAsync(token);
             }
             finally
             {
@@ -281,49 +250,179 @@ namespace CaroOnline.Winforms
             }
         }
 
-        private async Task<string?> ReceiveData(TcpClient target) // Nhan du lieu TCP
+        // ==========================================
+        // NHẬN DỮ LIỆU
+        // ==========================================
+
+        private async Task ReceiveLoopAsync(TcpClient tcp, NetworkStream netStream, CancellationTokenSource cts)
         {
-            NetworkStream stream = target.GetStream();
+            string? reason = null;
 
-            byte[] lengthBuffer = new byte[4];
+            try
+            {
+                while (!cts.IsCancellationRequested)
+                {
+                    Message? message = await ReadFrameAsync(netStream, cts.Token);
 
-            int read = await ReadExact(stream, lengthBuffer, 4);
+                    if (message == null)
+                    {
+                        reason = "Server đã đóng kết nối.";
+                        break;
+                    }
 
-            if (read == 0)
-                return null;
-            if (read != lengthBuffer.Length)
-                throw new EndOfStreamException("Connection closed during the frame header.");
+                    Dispatch(message);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Chủ động ngắt kết nối.
+            }
+            catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException
+                                           or InvalidDataException or JsonException)
+            {
+                reason = ex.Message;
+            }
+            finally
+            {
+                // Chỉ báo mất kết nối nếu đây vẫn là kết nối hiện tại và chưa tự ngắt
+                if (ReferenceEquals(client, tcp) && Interlocked.Exchange(ref disconnectRaised, 1) == 0)
+                {
+                    ResetRoomState();
+                    Raise(() => Disconnected?.Invoke(reason));
+                }
 
-            int length = IPAddress.NetworkToHostOrder(
-                BitConverter.ToInt32(lengthBuffer, 0)
-            );
-
-            if (length <= 0 || length > settings.MaxFrameBytes)
-                throw new InvalidDataException("Du lieu khong hop le");
-
-            byte[] data = new byte[length];
-
-            read = await ReadExact(stream, data, length);
-
-            if (read != length)
-                throw new EndOfStreamException();
-
-            return Encoding.UTF8.GetString(data);
+                try { tcp.Close(); } catch { }
+            }
         }
 
-        private async Task<int> ReadExact(
-            NetworkStream stream,
-            byte[] buffer,
-            int length)
+        private void Dispatch(Message message)
+        {
+            switch ((message.Type ?? string.Empty).Trim().ToUpperInvariant())
+            {
+                case "PLAYER_LIST":
+                    List<PlayerSummary> players = message.Players ?? new List<PlayerSummary>();
+                    Raise(() => PlayerListReceived?.Invoke(players));
+                    break;
+
+                case "ROOM_LIST":
+                    List<RoomSummary> rooms = message.Rooms ?? new List<RoomSummary>();
+                    Raise(() => RoomListReceived?.Invoke(rooms));
+                    break;
+
+                case "CHALLENGE":
+                    string challenger = message.Name ?? string.Empty;
+                    Raise(() => ChallengeReceived?.Invoke(challenger));
+                    break;
+
+                case "CHALLENGE_REJECT":
+                    string rejecter = message.Name ?? string.Empty;
+                    Raise(() => ChallengeRejected?.Invoke(rejecter));
+                    break;
+
+                case "ROOM_STATE":
+                    CurrentRoomId = message.RoomId ?? string.Empty;
+                    MyPlayerIndex = message.YourPlayerIndex;
+                    IsSpectator = message.IsSpectator;
+                    Raise(() => RoomStateReceived?.Invoke(message));
+                    break;
+
+                case "MOVE":
+                    Raise(() => MoveReceived?.Invoke(message));
+                    break;
+
+                case "TURN":
+                    Raise(() => TurnChanged?.Invoke(message));
+                    break;
+
+                case "TURN_TIMER":
+                    Raise(() => TurnTimerTick?.Invoke(message));
+                    break;
+
+                case "GAME_OVER":
+                    Raise(() => GameOver?.Invoke(message));
+                    ResetRoomState();
+                    break;
+
+                case "PLAYER_DISCONNECTED":
+                    Raise(() => PlayerDisconnected?.Invoke(message));
+                    break;
+
+                case "PLAYER_RECONNECTED":
+                    Raise(() => PlayerReconnected?.Invoke(message));
+                    break;
+
+                case "ERROR":
+                    string code = message.ErrorCode ?? string.Empty;
+                    string text = message.Data ?? string.Empty;
+                    Raise(() => ErrorReceived?.Invoke(code, text));
+                    break;
+
+                case "INFO":
+                    string info = message.Data ?? string.Empty;
+                    Raise(() => InfoReceived?.Invoke(info));
+                    break;
+
+                case "WELCOME":
+                case "PONG":
+                default:
+                    break;
+            }
+        }
+
+        private void ApplyWelcome(Message welcome)
+        {
+            CurrentRoomId = welcome.RoomId ?? string.Empty;
+            MyPlayerIndex = string.IsNullOrEmpty(CurrentRoomId) ? -1 : welcome.PlayerIndex;
+            IsSpectator = false;
+        }
+
+        private void ResetRoomState()
+        {
+            CurrentRoomId = string.Empty;
+            MyPlayerIndex = -1;
+            IsSpectator = false;
+        }
+
+        // ==========================================
+        // KHUNG DỮ LIỆU: 4 byte độ dài (big-endian) + JSON UTF-8
+        // ==========================================
+
+        private static async Task<Message?> ReadFrameAsync(NetworkStream netStream, CancellationToken token)
+        {
+            byte[] header = new byte[sizeof(int)];
+
+            int headerBytes = await ReadExactlyAsync(netStream, header, token);
+
+            if (headerBytes == 0)
+                return null;
+
+            if (headerBytes != header.Length)
+                throw new EndOfStreamException("Kết nối đóng giữa chừng.");
+
+            int length = IPAddress.NetworkToHostOrder(BitConverter.ToInt32(header, 0));
+
+            if (length <= 0 || length > MaxFrameBytes)
+                throw new InvalidDataException("Độ dài khung dữ liệu không hợp lệ.");
+
+            byte[] payload = new byte[length];
+
+            if (await ReadExactlyAsync(netStream, payload, token) != length)
+                throw new EndOfStreamException("Kết nối đóng giữa chừng.");
+
+            return JsonSerializer.Deserialize<Message>(payload, JsonOptions)
+                ?? throw new JsonException("Tin nhắn rỗng.");
+        }
+
+        private static async Task<int> ReadExactlyAsync(NetworkStream netStream, byte[] buffer, CancellationToken token)
         {
             int total = 0;
 
-            while (total < length)
+            while (total < buffer.Length)
             {
-                int read = await stream.ReadAsync(buffer.AsMemory(total, length - total));
+                int read = await netStream.ReadAsync(buffer.AsMemory(total), token);
 
                 if (read == 0)
-                    return 0;
+                    return total;
 
                 total += read;
             }
@@ -331,40 +430,13 @@ namespace CaroOnline.Winforms
             return total;
         }
 
-        public string GetLocalIPv4(NetworkInterfaceType type)  // Lay dia chi IPv4 cua may tinh
+        // Chuyển về luồng giao diện nếu có
+        private void Raise(Action action)
         {
-            foreach (NetworkInterface item in
-                NetworkInterface.GetAllNetworkInterfaces())
-            {
-                if (item.NetworkInterfaceType == type &&
-                    item.OperationalStatus == OperationalStatus.Up)
-                {
-                    foreach (UnicastIPAddressInformation ip in
-                        item.GetIPProperties().UnicastAddresses)
-                    {
-                        if (ip.Address.AddressFamily ==
-                            AddressFamily.InterNetwork)
-                        {
-                            return ip.Address.ToString();
-                        }
-                    }
-                }
-            }
-
-            return "127.0.0.1";
+            if (uiContext != null)
+                uiContext.Post(_ => action(), null);
+            else
+                action();
         }
-
-        public void Close() // Ngat ket noi
-        {
-            cancellation?.Cancel();
-
-            client?.Close();
-
-            client = null;
-
-            StopServer();
-        }
-
-        #endregion
     }
 }
