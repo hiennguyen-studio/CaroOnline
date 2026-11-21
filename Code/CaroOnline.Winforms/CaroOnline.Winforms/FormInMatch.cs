@@ -121,6 +121,7 @@ namespace CaroOnline.Winforms
 
         private void ApplyRoomState(Message state)
         {
+            string previousRoomId = roomId;
             myIndex = state.YourPlayerIndex;
             isSpectator = state.IsSpectator;
             roomId = state.RoomId ?? string.Empty;
@@ -130,9 +131,13 @@ namespace CaroOnline.Winforms
             boardLocked = false;
             connectionLost = false;
 
-            // Vẽ lại bàn cờ rồi đặt toàn bộ quân theo bản chụp của server
-            ChessBoard.NewGame();
-            ChessBoard.SetCellSize(30);
+            // Chỉ vẽ lại hoàn toàn khi mới vào phòng. Với cùng một phòng, ApplyRemoteSnapshot
+            // chỉ đồng bộ ô cờ để tránh làm reset UI hoặc mất khả năng thao tác khi khán giả vào/rời.
+            if (!string.Equals(previousRoomId, roomId, StringComparison.OrdinalIgnoreCase) || ChessBoard.Matrix == null)
+            {
+                ChessBoard.NewGame();
+                ChessBoard.SetCellSize(30);
+            }
 
             if (state.Board is { Length: > 0 } board)
                 ChessBoard.ApplyRemoteSnapshot(board, state.PlayerIndex);
@@ -597,7 +602,10 @@ namespace CaroOnline.Winforms
             undoToolStripMenuItem.Enabled = canUndo;
 
             if (surrenderButton != null)
+            {
+                surrenderButton.Visible = !isSpectator;
                 surrenderButton.Enabled = !isSpectator && !isGameEnded && !connectionLost;
+            }
 
             if (timerHintLabel != null)
             {

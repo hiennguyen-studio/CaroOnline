@@ -9,8 +9,8 @@ namespace CaroOnline.Server
     // Mọi thao tác đều được khóa nội bộ để an toàn khi nhiều luồng cùng truy cập.
     public class GameManager
     {
-        public const int ROWS = 14;
-        public const int COLS = 17;
+        public const int ROWS = 15;
+        public const int COLS = 15;
 
         private readonly object sync = new object();
 
