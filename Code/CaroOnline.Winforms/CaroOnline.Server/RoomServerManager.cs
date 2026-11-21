@@ -44,7 +44,7 @@ namespace CaroOnline.Server
         public int Port => settings.Port;
         public int MaxConnections => settings.MaxConnections;
         public int MaxRooms => settings.MaxRooms;
-
+        public Database? Database { get; set; }
         public RoomServerManager(ServerSettings? serverSettings = null)
         {
             settings = serverSettings ?? ServerSettings.Load();
@@ -352,6 +352,9 @@ namespace CaroOnline.Server
                     break;
                 case "GET_ROOMS":
                     await SendRoomListAsync(session, token);
+                    break;
+                case "GET_HISTORY":
+                    await SendHistoryAsync(session, token);
                     break;
                 case "CHALLENGE":
                     await SendChallengeAsync(session, message, token);
@@ -1370,9 +1373,44 @@ namespace CaroOnline.Server
         // ==========================================
         // LỊCH SỬ TRẬN ĐẤU
         // ==========================================
+        private async Task SendHistoryAsync(ServerSession session, CancellationToken token)
+        {
+            List<HistoryItem> items = new();
+            Database? db = Database;
+            if (db != null)
+            {
+                try
+                {
+                    items = await Task.Run(() => db.GetMatchHistory(session.Name), token);
+                }
+                catch (Exception ex)
+                {
+                    Log("Không đọc được lịch sử từ SQL: " + ex.Message);
+                }
+            }
+
+            await SendToSessionAsync(session, new Message { Type = "HISTORY_LIST", History = items }, token);
+        }
+
 
         private async Task SaveMatchHistoryAsync(MatchHistoryRecord record, CancellationToken token)
         {
+            // Lưu vào SQL (lỗi SQL không làm hỏng Server, file JSON vẫn được ghi bên dưới)
+            Database? db = Database;
+            if (db != null)
+            {
+                try
+                {
+                    await Task.Run(() => db.SaveMatchHistory(
+                        record.RoomId, record.PlayerOne, record.PlayerTwo, record.Result,
+                        record.StartedAtUtc, record.FinishedAtUtc, record.Moves.Count,
+                        JsonSerializer.Serialize(record.Moves)), token);
+                }
+                catch (Exception ex)
+                {
+                    Log("Không lưu được lịch sử vào SQL: " + ex.Message);
+                }
+            }
             await historyLock.WaitAsync(token);
             try
             {

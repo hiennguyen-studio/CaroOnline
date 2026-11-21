@@ -35,6 +35,11 @@ namespace CaroOnline.Server
         public int MaxConnections => roomManager.MaxConnections;
 
         public int MaxRooms => roomManager.MaxRooms;
+        public Database? Database
+        {
+            get => roomManager.Database;
+            set => roomManager.Database = value;
+        }
 
         public int RoomCount => roomManager.RoomCount;
 
