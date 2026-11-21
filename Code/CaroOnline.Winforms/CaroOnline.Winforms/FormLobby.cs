@@ -57,6 +57,8 @@ namespace CaroOnline.Winforms
         private Label? challengeText;
         private LobbyButton? acceptChallengeButton;
         private LobbyButton? declineChallengeButton;
+        private RoundedPanel? challengeRequestCard;
+        private RoundedPanel? ongoingMatchesCard;
         private string? pendingChallenger;
 
         // Đang mở cửa sổ trận đấu (tránh mở trùng khi server gửi ROOM_STATE nhiều lần)
@@ -69,6 +71,13 @@ namespace CaroOnline.Winforms
             InitializeComponent();
             DoubleBuffered = true;
             WindowState = FormWindowState.Normal;
+            lobbyToolTip.OwnerDraw = true;
+            lobbyToolTip.BackColor = ColorTranslator.FromHtml("#162232");
+            lobbyToolTip.ForeColor = White;
+            lobbyToolTip.InitialDelay = 450;
+            lobbyToolTip.ReshowDelay = 100;
+            lobbyToolTip.Popup += LobbyToolTip_Popup;
+            lobbyToolTip.Draw += LobbyToolTip_Draw;
 
             ChessBoard = new ChessBoardManager(
                 pnlChessBoard,
@@ -84,6 +93,7 @@ namespace CaroOnline.Winforms
             socketManager.RoomListReceived += SocketManager_RoomListReceived;
             socketManager.ChallengeReceived += SocketManager_ChallengeReceived;
             socketManager.ChallengeRejected += SocketManager_ChallengeRejected;
+            socketManager.ChallengeCancelled += SocketManager_ChallengeCancelled;
             socketManager.RoomStateReceived += SocketManager_RoomStateReceived;
             socketManager.GameOver += SocketManager_GameOver;
             socketManager.ErrorReceived += SocketManager_ErrorReceived;
@@ -323,10 +333,20 @@ namespace CaroOnline.Winforms
             SetConnectionStatus($"{rejecterName} đã từ chối lời thách đấu", Coral);
         }
 
+        private void SocketManager_ChallengeCancelled(string challengerName)
+        {
+            if (!string.Equals(pendingChallenger, challengerName, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            ShowChallenge(null);
+            SetConnectionStatus($"Lời thách đấu từ {challengerName} đã bị hủy", Muted);
+        }
+
         private void ShowChallenge(string? challenger)
         {
             pendingChallenger = challenger;
             bool hasChallenge = !string.IsNullOrEmpty(challenger);
+            LayoutChallengeCards(hasChallenge);
 
             if (challengeText != null)
             {
@@ -338,6 +358,26 @@ namespace CaroOnline.Winforms
                 acceptChallengeButton.Enabled = hasChallenge;
             if (declineChallengeButton != null)
                 declineChallengeButton.Enabled = hasChallenge;
+        }
+
+        private void LayoutChallengeCards(bool hasChallenge)
+        {
+            if (challengeRequestCard != null)
+                challengeRequestCard.Visible = hasChallenge;
+
+            if (ongoingMatchesCard != null)
+            {
+                ongoingMatchesCard.Bounds = hasChallenge
+                    ? new Rectangle(712, 266, 356, 442)
+                    : new Rectangle(712, 110, 356, 598);
+            }
+
+            if (matchListControl != null)
+            {
+                matchListControl.Bounds = hasChallenge
+                    ? new Rectangle(8, 42, 340, 390)
+                    : new Rectangle(8, 42, 340, 546);
+            }
         }
 
         private async void AcceptChallenge_Click(object? sender, EventArgs e)
@@ -483,6 +523,76 @@ namespace CaroOnline.Winforms
             match.ShowDialog(this);
         }
 
+        private async void AvatarButton_Click(object? sender, EventArgs e)
+        {
+            using var overlay = new FormOverlay { Bounds = Bounds };
+            overlay.Show(this);
+
+            string historyPlayerName = string.IsNullOrWhiteSpace(socketManager.PlayerName)
+                ? localPlayerName
+                : socketManager.PlayerName;
+            using var history = new FormMatchHistory(historyPlayerName);
+            Action<List<HistoryItem>> historyHandler = items =>
+            {
+                if (!history.IsDisposed)
+                    history.SetHistory(items);
+            };
+            socketManager.HistoryReceived += historyHandler;
+            history.Shown += async (_, _) =>
+            {
+                if (!socketManager.IsConnected)
+                {
+                    history.SetError("Chưa kết nối server để tải lịch sử.");
+                    return;
+                }
+
+                history.SetLoading();
+                try
+                {
+                    await socketManager.RequestHistoryAsync();
+                }
+                catch (Exception ex)
+                {
+                    if (!history.IsDisposed)
+                        history.SetError("Không tải được lịch sử: " + ex.Message);
+                }
+            };
+
+            try
+            {
+                history.ShowDialog(overlay);
+            }
+            finally
+            {
+                socketManager.HistoryReceived -= historyHandler;
+                if (!overlay.IsDisposed)
+                    overlay.Close();
+            }
+        }
+
+        private void LobbyToolTip_Popup(object? sender, PopupEventArgs e)
+        {
+            using var font = new Font("Segoe UI", 8.5F);
+            string text = lobbyToolTip.GetToolTip(e.AssociatedControl) ?? string.Empty;
+            Size textSize = TextRenderer.MeasureText(text, font);
+            e.ToolTipSize = new Size(textSize.Width + 20, textSize.Height + 12);
+        }
+
+        private void LobbyToolTip_Draw(object? sender, DrawToolTipEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using GraphicsPath path = CreateRoundedPath(new RectangleF(e.Bounds.X, e.Bounds.Y,
+                e.Bounds.Width - 1, e.Bounds.Height - 1), 8F);
+            using var background = new SolidBrush(ColorTranslator.FromHtml("#162232"));
+            using var border = new Pen(ColorTranslator.FromHtml("#2B4055"));
+            e.Graphics.FillPath(background, path);
+            e.Graphics.DrawPath(border, path);
+            using var font = new Font("Segoe UI", 8.5F);
+            TextRenderer.DrawText(e.Graphics, e.ToolTipText, font,
+                Rectangle.Inflate(e.Bounds, -10, -6), White,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+        }
+
         #endregion
 
         private void InitializeRoomLobbyUI()
@@ -519,22 +629,19 @@ namespace CaroOnline.Winforms
             stepNumber.MouseDown += DragWindow;
             title.MouseDown += DragWindow;
             subtitle.MouseDown += DragWindow;
-            var notificationText = MakeLobbyLabel("Bạn có 1 thông báo mới", new Font("Segoe UI", 8.5F), Muted,
-                new Point(785, 29), new Size(190, 22), ContentAlignment.MiddleRight);
-            notificationText.Visible = false;
-            var notification = new BellButton
+            var historyAvatar = new HistoryAvatarButton
             {
                 Location = new Point(1014, 17),
                 Size = new Size(42, 42),
                 BackColor = ColorTranslator.FromHtml("#131E2E")
             };
-            notification.Click += (_, _) => notificationText.Visible = !notificationText.Visible;
+            historyAvatar.Click += AvatarButton_Click;
+            lobbyToolTip.SetToolTip(historyAvatar, "Lịch sử đấu");
 
             surface.Controls.Add(stepNumber);
             surface.Controls.Add(title);
             surface.Controls.Add(subtitle);
-            surface.Controls.Add(notificationText);
-            surface.Controls.Add(notification);
+            surface.Controls.Add(historyAvatar);
             connectionStatusLabel = MakeLobbyLabel("Chưa kết nối server", new Font("Segoe UI", 9F), Muted,
                 new Point(640, 56), new Size(364, 22), ContentAlignment.MiddleRight);
             surface.Controls.Add(connectionStatusLabel);
@@ -554,9 +661,9 @@ namespace CaroOnline.Winforms
                 ColorTranslator.FromHtml("#101926"), ColorTranslator.FromHtml("#1E2D3D"), 16);
             surface.Controls.Add(playersCard);
             playersCard.Controls.Add(MakeLobbyLabel("Danh sách\nplayer online", new Font("Segoe UI", 11F, FontStyle.Bold), White,
-                new Point(14, 14), new Size(182, 42), ContentAlignment.MiddleLeft));
+                new Point(14, 14), new Size(182, 42), ContentAlignment.MiddleLeft, playersCard.BackColor));
             onlineCountLabel = MakeLobbyLabel("Ngoại tuyến", new Font("Segoe UI", 9F), Muted,
-                new Point(14, 58), new Size(182, 20), ContentAlignment.MiddleLeft);
+                new Point(14, 58), new Size(182, 20), ContentAlignment.MiddleLeft, playersCard.BackColor);
             playersCard.Controls.Add(onlineCountLabel);
             playerListControl = new PlayerListControl
             {
@@ -572,25 +679,25 @@ namespace CaroOnline.Winforms
             lobbyToolTip.SetToolTip(playerListControl, "Bấm vào tên người chơi để thách đấu");
             playersCard.Controls.Add(playerListControl);
             playersCard.Controls.Add(MakeLobbyLabel("● Rảnh", new Font("Segoe UI", 8.5F), Green,
-                new Point(14, 512), new Size(70, 20), ContentAlignment.MiddleLeft));
+                new Point(14, 512), new Size(70, 20), ContentAlignment.MiddleLeft, playersCard.BackColor));
             playersCard.Controls.Add(MakeLobbyLabel("● Đang đấu", new Font("Segoe UI", 8.5F), Coral,
-                new Point(92, 512), new Size(100, 20), ContentAlignment.MiddleLeft));
+                new Point(92, 512), new Size(100, 20), ContentAlignment.MiddleLeft, playersCard.BackColor));
 
             var matchCard = MakeLobbyCard(new Point(246, 110), new Size(450, 598),
                 ColorTranslator.FromHtml("#0E1622"), ColorTranslator.FromHtml("#1E2D3D"), 16);
             surface.Controls.Add(matchCard);
             matchPlayerOneLabel = MakeLobbyLabel("—", new Font("Segoe UI", 13F, FontStyle.Bold), Cyan,
-                new Point(36, 16), new Size(130, 26), ContentAlignment.MiddleRight);
+                new Point(36, 16), new Size(130, 26), ContentAlignment.MiddleRight, matchCard.BackColor);
             matchPlayerOneLabel.AutoEllipsis = true;
             matchCard.Controls.Add(matchPlayerOneLabel);
             matchCard.Controls.Add(MakeLobbyLabel("vs", new Font("Segoe UI", 10F, FontStyle.Bold), Muted,
-                new Point(184, 18), new Size(82, 24), ContentAlignment.MiddleCenter));
+                new Point(184, 18), new Size(82, 24), ContentAlignment.MiddleCenter, matchCard.BackColor));
             matchPlayerTwoLabel = MakeLobbyLabel("—", new Font("Segoe UI", 13F, FontStyle.Bold), Coral,
-                new Point(284, 16), new Size(130, 26), ContentAlignment.MiddleLeft);
+                new Point(284, 16), new Size(130, 26), ContentAlignment.MiddleLeft, matchCard.BackColor);
             matchPlayerTwoLabel.AutoEllipsis = true;
             matchCard.Controls.Add(matchPlayerTwoLabel);
             matchCard.Controls.Add(MakeLobbyLabel("BÀN CỜ · 15 × 15", new Font("Segoe UI", 8.5F, FontStyle.Bold), Muted,
-                new Point(80, 52), new Size(290, 20), ContentAlignment.MiddleCenter));
+                new Point(80, 52), new Size(290, 20), ContentAlignment.MiddleCenter, matchCard.BackColor));
             matchCard.Controls.Add(new BoardPreviewControl
             {
                 Location = new Point(60, 82),
@@ -611,11 +718,12 @@ namespace CaroOnline.Winforms
 
             var requestCard = MakeLobbyCard(new Point(712, 110), new Size(356, 140),
                 ColorTranslator.FromHtml("#102027"), ColorTranslator.FromHtml("#1E464A"), 14);
+            challengeRequestCard = requestCard;
             surface.Controls.Add(requestCard);
             requestCard.Controls.Add(MakeLobbyLabel("Yêu cầu thách đấu", new Font("Segoe UI", 11F, FontStyle.Bold), White,
-                new Point(14, 11), new Size(320, 24), ContentAlignment.MiddleLeft));
+                new Point(14, 11), new Size(320, 24), ContentAlignment.MiddleLeft, requestCard.BackColor));
             challengeText = MakeLobbyLabel("Chưa có lời thách đấu", new Font("Segoe UI", 9.5F), Muted,
-                new Point(14, 38), new Size(320, 22), ContentAlignment.MiddleLeft);
+                new Point(14, 38), new Size(320, 22), ContentAlignment.MiddleLeft, requestCard.BackColor);
             requestCard.Controls.Add(challengeText);
             acceptChallengeButton = MakeLobbyButton("✓ Chấp nhận", new Point(12, 82), new Size(154, 38),
                 ColorTranslator.FromHtml("#133829"), ColorTranslator.FromHtml("#4ADE80"), ColorTranslator.FromHtml("#1F5E43"));
@@ -625,15 +733,17 @@ namespace CaroOnline.Winforms
             declineChallengeButton.Click += DeclineChallenge_Click;
             requestCard.Controls.Add(acceptChallengeButton);
             requestCard.Controls.Add(declineChallengeButton);
-            ShowChallenge(null);
+            acceptChallengeButton.BringToFront();
+            declineChallengeButton.BringToFront();
 
             var roomsCard = MakeLobbyCard(new Point(712, 266), new Size(356, 442),
                 ColorTranslator.FromHtml("#0E1622"), ColorTranslator.FromHtml("#1E2D3D"), 16);
+            ongoingMatchesCard = roomsCard;
             surface.Controls.Add(roomsCard);
             roomsCard.Controls.Add(MakeLobbyLabel("Trận đang diễn ra", new Font("Segoe UI", 12F, FontStyle.Bold), White,
-                new Point(14, 10), new Size(210, 24), ContentAlignment.MiddleLeft));
+                new Point(14, 10), new Size(210, 24), ContentAlignment.MiddleLeft, roomsCard.BackColor));
             matchCountLabel = MakeLobbyLabel("0 trận", new Font("Segoe UI", 9.5F), Muted,
-                new Point(254, 11), new Size(84, 22), ContentAlignment.MiddleRight);
+                new Point(254, 11), new Size(84, 22), ContentAlignment.MiddleRight, roomsCard.BackColor);
             roomsCard.Controls.Add(matchCountLabel);
             matchListControl = new MatchListControl
             {
@@ -649,6 +759,7 @@ namespace CaroOnline.Winforms
                 ShowSelectedMatch(match);
             };
             roomsCard.Controls.Add(matchListControl);
+            ShowChallenge(null);
 
             roomViewTitle = new Label
             {
@@ -762,10 +873,10 @@ namespace CaroOnline.Winforms
         private static readonly Color Green = ColorTranslator.FromHtml("#34D399");
 
         private static Label MakeLobbyLabel(string text, Font font, Color color, Point location, Size size,
-            ContentAlignment alignment) => new()
+            ContentAlignment alignment, Color? backColor = null) => new()
             {
                 AutoSize = false,
-                BackColor = Color.Transparent,
+                BackColor = backColor ?? Color.Transparent,
                 Text = text,
                 Font = font,
                 ForeColor = color,
@@ -1077,10 +1188,11 @@ namespace CaroOnline.Winforms
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
                 var bounds = new RectangleF(0.5F, 0.5F, Width - 1F, Height - 1F);
                 using GraphicsPath path = CreateRoundedPath(bounds, 10F);
-                Color fill = !Enabled ? Color.FromArgb(45, 54, 66, 78)
+                Color fill = !Enabled ? Color.FromArgb(54, 66, 78)
                     : Capture ? ControlPaint.Dark(BackColor, 0.08F)
                     : ClientRectangle.Contains(PointToClient(MousePosition)) ? ControlPaint.Light(BackColor, 0.08F)
                     : BackColor;
+                e.Graphics.Clear(fill);
                 using var brush = new SolidBrush(fill);
                 e.Graphics.FillPath(brush, path);
                 if (BorderColor != Color.Transparent)
@@ -1093,14 +1205,27 @@ namespace CaroOnline.Winforms
             }
         }
 
-        private sealed class BellButton : Control
+        private sealed class HistoryAvatarButton : Control
         {
-            public BellButton()
+            public HistoryAvatarButton()
             {
                 DoubleBuffered = true;
                 SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
                 Cursor = Cursors.Hand;
+                Resize += (_, _) => UpdateRegion();
+            }
+
+            protected override void OnMouseEnter(EventArgs e)
+            {
+                base.OnMouseEnter(e);
+                Invalidate();
+            }
+
+            protected override void OnMouseLeave(EventArgs e)
+            {
+                base.OnMouseLeave(e);
+                Invalidate();
             }
 
             protected override void OnPaintBackground(PaintEventArgs e)
@@ -1111,27 +1236,29 @@ namespace CaroOnline.Winforms
             protected override void OnPaint(PaintEventArgs e)
             {
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-                var bounds = new RectangleF(0.5F, 0.5F, Width - 1F, Height - 1F);
-                using GraphicsPath buttonPath = CreateRoundedPath(bounds, 12F);
-                using var buttonBrush = new SolidBrush(BackColor);
-                using var borderPen = new Pen(ColorTranslator.FromHtml("#223249"), 1F);
-                e.Graphics.FillPath(buttonBrush, buttonPath);
-                e.Graphics.DrawPath(borderPen, buttonPath);
+                bool hovered = ClientRectangle.Contains(PointToClient(MousePosition));
+                Color background = hovered ? ControlPaint.Light(BackColor, 0.08F) : BackColor;
+                using var backgroundBrush = new SolidBrush(background);
+                e.Graphics.FillEllipse(backgroundBrush, 2, 2, Width - 4, Height - 4);
 
-                using var bellPen = new Pen(White, 1.8F) { StartCap = LineCap.Round, EndCap = LineCap.Round };
-                using var bellPath = new GraphicsPath();
-                bellPath.AddArc(14, 11, 14, 16, 180, 180);
-                bellPath.AddLine(14, 19, 12, 27);
-                bellPath.AddLine(12, 27, 30, 27);
-                bellPath.AddLine(30, 27, 28, 19);
-                e.Graphics.DrawPath(bellPen, bellPath);
-                e.Graphics.DrawLine(bellPen, 17, 30, 27, 30);
-                using var badgeBrush = new SolidBrush(ColorTranslator.FromHtml("#EF4444"));
-                using var badgeFont = new Font("Segoe UI", 7F, FontStyle.Bold);
-                e.Graphics.FillEllipse(badgeBrush, 28, 2, 12, 12);
-                TextRenderer.DrawText(e.Graphics, "1", badgeFont,
-                    new Rectangle(28, 1, 12, 13), White,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+                using var iconBrush = new SolidBrush(ColorTranslator.FromHtml("#E2E8F0"));
+                float centerX = Width / 2F;
+                e.Graphics.FillEllipse(iconBrush, centerX - 5, 8, 10, 10);
+                e.Graphics.FillEllipse(iconBrush, centerX - 10, 22, 20, 13);
+
+                using var borderPen = new Pen(ColorTranslator.FromHtml("#2CE6FF"), 2F);
+                e.Graphics.DrawEllipse(borderPen, 1, 1, Width - 3, Height - 3);
+            }
+
+            private void UpdateRegion()
+            {
+                if (Width <= 0 || Height <= 0)
+                    return;
+                using var path = new GraphicsPath();
+                path.AddEllipse(0, 0, Width, Height);
+                Region? previousRegion = Region;
+                Region = new Region(path);
+                previousRegion?.Dispose();
             }
         }
 

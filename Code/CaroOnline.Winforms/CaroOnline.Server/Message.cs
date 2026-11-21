@@ -85,11 +85,15 @@ namespace CaroOnline.Server
     // Một dòng lịch sử trận đấu đọc từ SQL
     public class HistoryItem
     {
+        public string RoomId { get; set; } = "";
+
         public string PlayerOne { get; set; } = "";
 
         public string PlayerTwo { get; set; } = "";
 
         public string Result { get; set; } = "";
+
+        public DateTime StartedAtUtc { get; set; }
 
         public DateTime FinishedAtUtc { get; set; }
 

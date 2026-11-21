@@ -33,6 +33,7 @@ namespace CaroOnline.Winforms
         public List<MatchMove>? Moves { get; set; }
         public List<PlayerSummary>? Players { get; set; }
         public List<RoomSummary>? Rooms { get; set; }
+        public List<HistoryItem>? History { get; set; }
 
         public DateTime? TurnDeadlineUtc { get; set; }
     }
@@ -60,5 +61,16 @@ namespace CaroOnline.Winforms
         public string PlayerTwo { get; set; } = string.Empty;
         public int SpectatorCount { get; set; }
         public bool IsGameOver { get; set; }
+    }
+
+    public class HistoryItem
+    {
+        public string RoomId { get; set; } = string.Empty;
+        public string PlayerOne { get; set; } = string.Empty;
+        public string PlayerTwo { get; set; } = string.Empty;
+        public string Result { get; set; } = string.Empty;
+        public DateTime StartedAtUtc { get; set; }
+        public DateTime FinishedAtUtc { get; set; }
+        public int TotalMoves { get; set; }
     }
 }
