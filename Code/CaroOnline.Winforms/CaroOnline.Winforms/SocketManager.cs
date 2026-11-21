@@ -41,12 +41,16 @@ namespace CaroOnline.Winforms
         public event Action<Message>? Welcomed;
         public event Action<List<PlayerSummary>>? PlayerListReceived;
         public event Action<List<RoomSummary>>? RoomListReceived;
+        public event Action<List<HistoryItem>>? HistoryReceived;
 
         // Có người thách đấu mình: tham số là tên người thách
         public event Action<string>? ChallengeReceived;
 
         // Lời thách đấu của mình bị từ chối: tham số là tên người từ chối
         public event Action<string>? ChallengeRejected;
+
+        // Người thách đấu đã hủy lời mời (ví dụ: ngắt kết nối)
+        public event Action<string>? ChallengeCancelled;
 
         // Vào phòng / cập nhật toàn bộ trạng thái phòng (người chơi lẫn khán giả)
         public event Action<Message>? RoomStateReceived;
@@ -189,6 +193,8 @@ namespace CaroOnline.Winforms
 
         public Task RequestRoomsAsync() => SendAsync(new Message { Type = "GET_ROOMS" });
 
+        public Task RequestHistoryAsync() => SendAsync(new Message { Type = "GET_HISTORY" });
+
         public Task ChallengeAsync(string targetName) =>
             SendAsync(new Message { Type = "CHALLENGE", TargetName = targetName });
 
@@ -309,6 +315,11 @@ namespace CaroOnline.Winforms
                     Raise(() => RoomListReceived?.Invoke(rooms));
                     break;
 
+                case "HISTORY_LIST":
+                    List<HistoryItem> history = message.History ?? new List<HistoryItem>();
+                    Raise(() => HistoryReceived?.Invoke(history));
+                    break;
+
                 case "CHALLENGE":
                     string challenger = message.Name ?? string.Empty;
                     Raise(() => ChallengeReceived?.Invoke(challenger));
@@ -317,6 +328,11 @@ namespace CaroOnline.Winforms
                 case "CHALLENGE_REJECT":
                     string rejecter = message.Name ?? string.Empty;
                     Raise(() => ChallengeRejected?.Invoke(rejecter));
+                    break;
+
+                case "CHALLENGE_CANCEL":
+                    string cancelledChallenger = message.Name ?? string.Empty;
+                    Raise(() => ChallengeCancelled?.Invoke(cancelledChallenger));
                     break;
 
                 case "ROOM_STATE":

@@ -21,8 +21,8 @@ namespace CaroOnline.Server
         private readonly string connectionString =
             "Server=100.103.157.39,1433;" +
             "Database=CaroOnlineDB;" +
-            "User Id=caro_member_nvh;" +
-            "Password=nvh123456;" +
+            "User Id=caro_member_dch;" +
+            "Password=29062006;" +
             "TrustServerCertificate=True;";
 
         // Hash SHA256 (hex in hoa), khớp với HASHBYTES trong SQL
@@ -197,7 +197,7 @@ namespace CaroOnline.Server
             {
                 conn.Open();
                 using (SqlCommand cmd = new SqlCommand(
-                    @"SELECT TOP 100 PlayerOne, PlayerTwo, Result, FinishedAt, TotalMoves
+                    @"SELECT TOP 100 RoomId, PlayerOne, PlayerTwo, Result, StartedAt, FinishedAt, TotalMoves
                       FROM MatchHistory
                       WHERE PlayerOne = @N OR PlayerTwo = @N
                       ORDER BY FinishedAt DESC", conn))
@@ -209,11 +209,13 @@ namespace CaroOnline.Server
                         {
                             list.Add(new HistoryItem
                             {
-                                PlayerOne = r.GetString(0),
-                                PlayerTwo = r.GetString(1),
-                                Result = r.GetString(2),
-                                FinishedAtUtc = DateTime.SpecifyKind(r.GetDateTime(3), DateTimeKind.Utc),
-                                TotalMoves = r.GetInt32(4)
+                                RoomId = r.GetString(0),
+                                PlayerOne = r.GetString(1),
+                                PlayerTwo = r.GetString(2),
+                                Result = r.GetString(3),
+                                StartedAtUtc = DateTime.SpecifyKind(r.GetDateTime(4), DateTimeKind.Utc),
+                                FinishedAtUtc = DateTime.SpecifyKind(r.GetDateTime(5), DateTimeKind.Utc),
+                                TotalMoves = r.GetInt32(6)
                             });
                         }
                     }

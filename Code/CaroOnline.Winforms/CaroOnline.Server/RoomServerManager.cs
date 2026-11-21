@@ -928,6 +928,7 @@ namespace CaroOnline.Server
 
         private async Task HandleSessionDisconnectedAsync(int connectionId, ServerSession session)
         {
+            List<ServerSession> challengeCancellationRecipients;
             await lobbyLock.WaitAsync();
             try
             {
@@ -939,7 +940,7 @@ namespace CaroOnline.Server
                 session.DisconnectedAtUtc = DateTime.UtcNow;
 
                 // Lời thách đấu liên quan đến người này không còn hiệu lực
-                RemovePendingChallenges(session.Name);
+                challengeCancellationRecipients = RemovePendingChallenges(session.Name);
 
                 if (session.IsSpectator && rooms.TryGetValue(session.RoomId, out GameRoom? spectatorRoom))
                 {
@@ -978,6 +979,15 @@ namespace CaroOnline.Server
             finally
             {
                 lobbyLock.Release();
+            }
+
+            foreach (ServerSession recipient in challengeCancellationRecipients)
+            {
+                await SendToSessionAsync(recipient, new Message
+                {
+                    Type = "CHALLENGE_CANCEL",
+                    Name = session.Name
+                }, CancellationToken.None);
             }
 
             Log($"{session.Name} mất kết nối; thời gian chờ kết nối lại là {settings.ReconnectSeconds} giây.");
@@ -1080,16 +1090,24 @@ namespace CaroOnline.Server
             }
         }
 
-        private void RemovePendingChallenges(string playerName)
+        private List<ServerSession> RemovePendingChallenges(string playerName)
         {
+            List<ServerSession> cancellationRecipients = new();
             foreach (KeyValuePair<string, string> pair in pendingChallenges)
             {
-                if (string.Equals(pair.Key, playerName, StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(pair.Value, playerName, StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(pair.Value, playerName, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (sessionsByName.TryGetValue(pair.Key, out ServerSession? recipient) && recipient.Client != null)
+                        cancellationRecipients.Add(recipient);
+                    pendingChallenges.TryRemove(pair.Key, out _);
+                }
+                else if (string.Equals(pair.Key, playerName, StringComparison.OrdinalIgnoreCase))
                 {
                     pendingChallenges.TryRemove(pair.Key, out _);
                 }
             }
+
+            return cancellationRecipients;
         }
 
         // ==========================================

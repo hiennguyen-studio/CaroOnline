@@ -56,7 +56,6 @@ namespace CaroOnline.Winforms
         private Label? matchMessageLabel;
         private Label? timerHintLabel;
         private CircularTimerControl? circularTimer;
-        private CyberButton? undoButton;
         private CyberButton? surrenderButton;
 
         public FormInMatch(SocketManager socketManager, Message initialState)
@@ -546,16 +545,12 @@ namespace CaroOnline.Winforms
                 new Point(14, 190), new Size(189, 24), ContentAlignment.MiddleCenter);
             card.Controls.Add(timerHintLabel);
 
-            undoButton = MakeActionButton("ĐI LẠI", new Point(12, 230), new Size(193, 42),
-                ColorTranslator.FromHtml("#123447"), Cyan, ColorTranslator.FromHtml("#1B4D65"));
-            undoButton.Click += (_, _) => UndoMove();
-            surrenderButton = MakeActionButton("ĐẦU HÀNG", new Point(12, 282), new Size(193, 42),
+            surrenderButton = MakeActionButton("ĐẦU HÀNG", new Point(12, 230), new Size(193, 42),
                 ColorTranslator.FromHtml("#351A28"), Coral, ColorTranslator.FromHtml("#5C2638"));
             surrenderButton.Click += (_, _) => Surrender();
-            var leaveButton = MakeActionButton("RỜI PHÒNG", new Point(12, 334), new Size(193, 42),
+            var leaveButton = MakeActionButton("RỜI PHÒNG", new Point(12, 282), new Size(193, 42),
                 ColorTranslator.FromHtml("#3A3215"), Amber, ColorTranslator.FromHtml("#75621B"));
             leaveButton.Click += (_, _) => LeaveRoomToLobby();
-            card.Controls.Add(undoButton);
             card.Controls.Add(surrenderButton);
             card.Controls.Add(leaveButton);
             card.Controls.Add(MakeLabel("Bình tĩnh.\nNước hay sẽ đến.", new Font("Segoe UI", 9F), Muted,
@@ -599,8 +594,6 @@ namespace CaroOnline.Winforms
 
             // Lượt luôn đổi qua lại, nên "chưa phải lượt mình" nghĩa là mình vừa đi nước cuối
             bool canUndo = !isSpectator && !locked && ChessBoard.MoveCount > 0 && ChessBoard.CurrentPlayer != myIndex;
-            if (undoButton != null)
-                undoButton.Enabled = canUndo;
             undoToolStripMenuItem.Enabled = canUndo;
 
             if (surrenderButton != null)
