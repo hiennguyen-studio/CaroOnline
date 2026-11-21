@@ -1,5 +1,6 @@
 using System;
 using System.Data;
+using System.Collections.Generic;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Data.SqlClient;
@@ -20,8 +21,8 @@ namespace CaroOnline.Server
         private readonly string connectionString =
             "Server=100.103.157.39,1433;" +
             "Database=CaroOnlineDB;" +
-            "User Id=tk;" +
-            "Password=mk;" +
+            "User Id=caro_member_nvh;" +
+            "Password=nvh123456;" +
             "TrustServerCertificate=True;";
 
         // Hash SHA256 (hex in hoa), khớp với HASHBYTES trong SQL
@@ -164,6 +165,61 @@ namespace CaroOnline.Server
                     return cmd.ExecuteNonQuery() > 0;
                 }
             }
+        }
+        public void SaveMatchHistory(string roomId, string p1, string p2, string result,
+    DateTime startedUtc, DateTime finishedUtc, int totalMoves, string movesJson)
+        {
+            using (SqlConnection conn = new SqlConnection(connectionString))
+            {
+                conn.Open();
+                using (SqlCommand cmd = new SqlCommand(
+                    @"INSERT INTO MatchHistory
+                      (RoomId, PlayerOne, PlayerTwo, Result, StartedAt, FinishedAt, TotalMoves, MovesJson)
+                      VALUES (@RoomId, @P1, @P2, @Result, @Start, @Finish, @Total, @Moves)", conn))
+                {
+                    cmd.Parameters.AddWithValue("@RoomId", roomId);
+                    cmd.Parameters.AddWithValue("@P1", p1);
+                    cmd.Parameters.AddWithValue("@P2", p2);
+                    cmd.Parameters.AddWithValue("@Result", result);
+                    cmd.Parameters.AddWithValue("@Start", startedUtc);
+                    cmd.Parameters.AddWithValue("@Finish", finishedUtc);
+                    cmd.Parameters.AddWithValue("@Total", totalMoves);
+                    cmd.Parameters.AddWithValue("@Moves", movesJson);
+                    cmd.ExecuteNonQuery();
+                }
+            }
+        }
+
+        public List<HistoryItem> GetMatchHistory(string playerName)
+        {
+            var list = new List<HistoryItem>();
+            using (SqlConnection conn = new SqlConnection(connectionString))
+            {
+                conn.Open();
+                using (SqlCommand cmd = new SqlCommand(
+                    @"SELECT TOP 100 PlayerOne, PlayerTwo, Result, FinishedAt, TotalMoves
+                      FROM MatchHistory
+                      WHERE PlayerOne = @N OR PlayerTwo = @N
+                      ORDER BY FinishedAt DESC", conn))
+                {
+                    cmd.Parameters.AddWithValue("@N", playerName);
+                    using (SqlDataReader r = cmd.ExecuteReader())
+                    {
+                        while (r.Read())
+                        {
+                            list.Add(new HistoryItem
+                            {
+                                PlayerOne = r.GetString(0),
+                                PlayerTwo = r.GetString(1),
+                                Result = r.GetString(2),
+                                FinishedAtUtc = DateTime.SpecifyKind(r.GetDateTime(3), DateTimeKind.Utc),
+                                TotalMoves = r.GetInt32(4)
+                            });
+                        }
+                    }
+                }
+            }
+            return list;
         }
     }
 }

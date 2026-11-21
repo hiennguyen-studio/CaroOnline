@@ -22,6 +22,7 @@ namespace CaroOnline.Server
 
             // Khởi tạo Game Server (đa phòng)
             server = new ServerSocketManager();
+            server.Database = database;
 
             // Nhận log từ Auth Server
             authServer.Log += message =>

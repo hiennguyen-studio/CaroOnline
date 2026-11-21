@@ -1,5 +1,4 @@
-﻿
-using System;
+﻿using System;
 using System.Collections.Generic;
 
 namespace CaroOnline.Server
@@ -53,6 +52,9 @@ namespace CaroOnline.Server
         // Danh sách phòng
         public List<RoomSummary> Rooms { get; set; } = new();
 
+        // Lịch sử trận đấu (trả về cho GET_HISTORY)
+        public List<HistoryItem> History { get; set; } = new();
+
         public Message()
         {
         }
@@ -78,5 +80,19 @@ namespace CaroOnline.Server
         public int SpectatorCount { get; set; }
 
         public bool IsGameOver { get; set; }
+    }
+
+    // Một dòng lịch sử trận đấu đọc từ SQL
+    public class HistoryItem
+    {
+        public string PlayerOne { get; set; } = "";
+
+        public string PlayerTwo { get; set; } = "";
+
+        public string Result { get; set; } = "";
+
+        public DateTime FinishedAtUtc { get; set; }
+
+        public int TotalMoves { get; set; }
     }
 }
