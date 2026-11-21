@@ -561,8 +561,9 @@ namespace CaroOnline.Server
                 return;
             }
 
+            // Chỉ gửi snapshot cho khán giả mới. Nếu phát ROOM_STATE cho cả phòng,
+            // client người chơi sẽ NewGame và làm bàn cờ/ván đang đấu bị reset.
             await SendRoomSnapshotAsync(spectator, room, token);
-            await BroadcastRoomAsync(room, CreateRoomStateMessage(room), token);
             await BroadcastPlayerListAsync(token);
             await SendRoomListAsync(null, token);
         }
@@ -588,7 +589,7 @@ namespace CaroOnline.Server
                 {
                     room.SyncLock.Release();
                 }
-                await BroadcastRoomAsync(room, CreateRoomStateMessage(room), token);
+                // Khán giả rời không thay đổi board hoặc lượt của hai người chơi.
                 await BroadcastPlayerListAsync(token);
                 await SendRoomListAsync(null, token);
                 return;
